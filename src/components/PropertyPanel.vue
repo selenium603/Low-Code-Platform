@@ -67,6 +67,8 @@
               <el-button-group>
                 <el-button @click="moveLayer('up')">上移</el-button>
                 <el-button @click="moveLayer('down')">下移</el-button>
+              </el-button-group>
+              <el-button-group>
                 <el-button @click="moveLayer('top')">置顶</el-button>
                 <el-button @click="moveLayer('bottom')">置底</el-button>
               </el-button-group>
@@ -173,7 +175,7 @@ watch(() => currentPage.value?.meta, (meta) => {
   pageScene.value = meta.scene
 }, { immediate: true })
 
-watch(() => currentPage.value?.style, (style) => {
+watch(() => editorStore.getEffectivePageStyle(), (style) => {
   if (!style) return
   pageWidth.value = style.width
   pageHeight.value = style.height
@@ -317,7 +319,9 @@ const deleteCurrentComponent = () => {
 .property-item label { font-size: 12px; color: #6b7280; font-weight: 600; }
 .input-with-upload { display: flex; gap: 8px; }
 .input-with-upload .el-input { flex: 1; }
-.property-buttons .el-button-group { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.property-buttons { display: flex; justify-content: center; gap: 12px; }
+.property-buttons .el-button { min-width: 66px; }
+.property-buttons .el-button-group .el-button + .el-button { margin-left: 12px; }
 .empty-state { padding: 32px 20px; color: #9ca3af; text-align: center; }
 .empty-state .el-icon { font-size: 40px; margin-bottom: 12px; }
 </style>

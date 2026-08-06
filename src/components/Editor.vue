@@ -181,21 +181,12 @@ const generateHTMLPage = (page: Record<string, unknown>): string => {
     }
   }
 
-  // DOM 顺序优先按手机端 order 排列，使无显式 order 的组件在移动端也遵循手机端排列
-  const componentsHtml = [...components]
-    .sort((a, b) => {
-      const aStyle = a.style as Record<string, unknown>
-      const bStyle = b.style as Record<string, unknown>
-      const aMobile = (a.responsiveOverrides as Record<string, Record<string, unknown>> | undefined)?.mobile
-      const bMobile = (b.responsiveOverrides as Record<string, Record<string, unknown>> | undefined)?.mobile
-      const aOrder = (aMobile?.order as number) ?? (aStyle.zIndex as number)
-      const bOrder = (bMobile?.order as number) ?? (bStyle.zIndex as number)
-      return aOrder - bOrder
-    })
-    .map(renderComponent).join('\n      ')
+  const componentsHtml = components.map(renderComponent).join('\n      ')
 
-  // 生成移动端媒体查询 CSS —— 始终生成，与编辑器预览行为一致
-  const MOBILE_AVAIL_W = 375 - 12 * 2 // 设备宽度 - 左右 padding
+  // 与编辑器 mobile.ts 保持一致：375px 画布、12px 安全边距、绝对定位。
+  const MOBILE_WIDTH = 375
+  const MOBILE_PADDING = 12
+  const MOBILE_AVAIL_W = MOBILE_WIDTH - MOBILE_PADDING * 2
 
   /** 根据组件类型返回视觉样式作用的目标选择器后缀 */
   const visualChildSelector = (type: string): string => {
@@ -216,20 +207,24 @@ const generateHTMLPage = (page: Record<string, unknown>): string => {
     const childRules: string[] = []
     const childSel = visualChildSelector(type)
 
-    // 结构性规则（wrapper）
-    const order = (eff.order as number) ?? (style.zIndex as number)
-    wrapperRules.push(`order:${order}`)
+    const rawWidth = typeof eff.width === 'number' ? eff.width : MOBILE_AVAIL_W
+    const width = rawWidth > 0 && rawWidth < MOBILE_WIDTH ? Math.min(rawWidth, MOBILE_AVAIL_W) : MOBILE_AVAIL_W
+    const rawHeight = typeof eff.height === 'number' ? eff.height : 120
+    const height = rawHeight > 40 ? rawHeight : 120
+    const rawLeft = typeof eff.left === 'number' ? eff.left : MOBILE_PADDING
+    const rawTop = typeof eff.top === 'number' ? eff.top : MOBILE_PADDING
+    const left = Math.min(MOBILE_WIDTH - MOBILE_PADDING - width, Math.max(MOBILE_PADDING, rawLeft))
+    const top = Math.max(MOBILE_PADDING, rawTop)
+    const zIndex = typeof eff.zIndex === 'number' ? eff.zIndex : 1
 
-    const w = eff.width as number
-    if (w && w > 0 && w < MOBILE_AVAIL_W) {
-      wrapperRules.push(`width:${Math.min(w, MOBILE_AVAIL_W)}px !important`)
-    } else {
-      wrapperRules.push('width:100% !important')
-    }
-
-    const h = eff.height as number
-    const minH = h && h > 40 ? h : 120
-    wrapperRules.push(`min-height:${minH}px !important`, 'height:auto !important')
+    wrapperRules.push(
+      'position:absolute !important',
+      `left:${left}px !important`,
+      `top:${top}px !important`,
+      `width:${width}px !important`,
+      `height:${height}px !important`,
+      `z-index:${zIndex} !important`
+    )
     if (eff.rotate !== undefined) wrapperRules.push(`transform:rotate(${eff.rotate}deg)`)
     if (eff.opacity !== undefined) wrapperRules.push(`opacity:${eff.opacity}`)
 
@@ -269,7 +264,7 @@ const generateHTMLPage = (page: Record<string, unknown>): string => {
     return css
   }).join('\n    ')
 
-  const mobileMediaQuery = `\n  @media (max-width: 768px) {\n    .page-container{width:100% !important;height:auto !important;min-height:auto;display:flex;flex-direction:column;padding:12px;gap:8px;box-sizing:border-box;}\n    .page-container > *{position:static !important;left:auto !important;top:auto !important;}\n    ${mobileCss}\n  }`
+  const mobileMediaQuery = `\n  @media (max-width: 768px) {\n    body{padding:16px 0;}\n    .page-container{width:${MOBILE_WIDTH}px !important;max-width:100%;height:812px !important;min-height:812px;position:relative;display:block;padding:0;box-sizing:border-box;}\n    .page-container > *{position:absolute !important;}\n    ${mobileCss}\n  }`
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">

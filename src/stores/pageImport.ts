@@ -98,8 +98,7 @@ const repairStyle = (protocol: ComponentProtocol, value: unknown): ComponentStyl
   const style = clone(protocol.defaultStyle)
   const numericKeys: Array<keyof ComponentStyle> = [
     'top', 'left', 'width', 'height', 'zIndex', 'rotate', 'opacity',
-    'fontSize', 'fontWeight', 'lineHeight', 'borderWidth', 'borderRadius',
-    'order'
+    'fontSize', 'fontWeight', 'lineHeight', 'borderWidth', 'borderRadius'
   ]
   const colorKeys: Array<keyof ComponentStyle> = ['color', 'backgroundColor', 'borderColor']
 
@@ -111,9 +110,6 @@ const repairStyle = (protocol: ComponentProtocol, value: unknown): ComponentStyl
   })
   if (raw.textAlign === 'left' || raw.textAlign === 'center' || raw.textAlign === 'right') {
     style.textAlign = raw.textAlign
-  }
-  if (raw.position === 'absolute' || raw.position === 'static') {
-    style.position = raw.position
   }
 
   style.top = Math.max(0, style.top)
@@ -132,7 +128,7 @@ const repairResponsiveOverrides = (value: unknown): ResponsiveOverrides | undefi
   const validDevices = [DeviceType.DESKTOP, DeviceType.MOBILE]
   const numericKeys: Array<keyof ComponentStyle> = [
     'top', 'left', 'width', 'height', 'zIndex', 'rotate', 'opacity',
-    'fontSize', 'fontWeight', 'lineHeight', 'borderWidth', 'borderRadius', 'order'
+    'fontSize', 'fontWeight', 'lineHeight', 'borderWidth', 'borderRadius'
   ]
   const colorKeys: Array<keyof ComponentStyle> = ['color', 'backgroundColor', 'borderColor']
 
@@ -147,8 +143,6 @@ const repairResponsiveOverrides = (value: unknown): ResponsiveOverrides | undefi
       if (typeof raw[key] === 'string') overrides[key] = raw[key] as never
     })
     if (raw.textAlign === 'left' || raw.textAlign === 'center' || raw.textAlign === 'right') overrides.textAlign = raw.textAlign
-    if (raw.position === 'absolute' || raw.position === 'static') overrides.position = raw.position
-
     if (overrides.width !== undefined) overrides.width = Math.max(40, overrides.width)
     if (overrides.height !== undefined) overrides.height = Math.max(40, overrides.height)
     if (overrides.opacity !== undefined) overrides.opacity = Math.max(0, Math.min(1, overrides.opacity))
@@ -160,6 +154,17 @@ const repairResponsiveOverrides = (value: unknown): ResponsiveOverrides | undefi
   }
 
   return Object.keys(result).length > 0 ? result : undefined
+}
+
+const repairPageResponsiveOverrides = (value: unknown) => {
+  if (!isRecord(value) || !isRecord(value.mobile)) return undefined
+  const raw = value.mobile
+  const mobile: Partial<PageData['style']> = {}
+  if (isFiniteNumber(raw.width)) mobile.width = Math.max(320, raw.width)
+  if (isFiniteNumber(raw.height)) mobile.height = Math.max(400, raw.height)
+  if (typeof raw.backgroundColor === 'string') mobile.backgroundColor = raw.backgroundColor
+  if (typeof raw.backgroundImage === 'string') mobile.backgroundImage = raw.backgroundImage
+  return Object.keys(mobile).length > 0 ? { [DeviceType.MOBILE]: mobile } : undefined
 }
 
 const repairComponent = (value: unknown, index: number, warnings: string[]): ComponentData | null => {
@@ -219,6 +224,7 @@ export const validateAndRepairPageData = (value: unknown): PageImportResult => {
   const warnings: string[] = []
   const rawMeta = isRecord(value.meta) ? value.meta : {}
   const rawStyle = isRecord(value.style) ? value.style : {}
+  const pageResponsiveOverrides = repairPageResponsiveOverrides(value.responsiveOverrides)
   const rawComponents = Array.isArray(value.components) ? value.components : []
   if (!Array.isArray(value.components)) warnings.push('组件列表无效，已按空页面导入。')
 
@@ -245,7 +251,7 @@ export const validateAndRepairPageData = (value: unknown): PageImportResult => {
         description: typeof rawMeta.description === 'string' ? rawMeta.description : '',
         createdAt: typeof rawMeta.createdAt === 'string' ? rawMeta.createdAt : new Date().toISOString(),
         updatedAt: typeof rawMeta.updatedAt === 'string' ? rawMeta.updatedAt : new Date().toISOString(),
-        version: typeof rawMeta.version === 'string' ? rawMeta.version : '2026.04',
+        version: typeof rawMeta.version === 'string' ? rawMeta.version : '2026.05',
         scene
       },
       style: {
@@ -254,6 +260,7 @@ export const validateAndRepairPageData = (value: unknown): PageImportResult => {
         backgroundColor: typeof rawStyle.backgroundColor === 'string' ? rawStyle.backgroundColor : '#f9fafb',
         backgroundImage: typeof rawStyle.backgroundImage === 'string' ? rawStyle.backgroundImage : ''
       },
+      ...(pageResponsiveOverrides ? { responsiveOverrides: pageResponsiveOverrides } : {}),
       components
     },
     warnings

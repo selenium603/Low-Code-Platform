@@ -7,6 +7,7 @@ import type {
   Command,
   PageData,
   PageMeta,
+  PageStyle,
   DeviceType,
   ResponsiveOverrides
 } from '@/types'
@@ -15,7 +16,7 @@ import { useHistoryStore } from './history'
 import { getComponentProtocol } from '@/components/components/registry'
 import { SCHEMA_VERSION, migratePageData } from './migration'
 import { validateAndRepairPageData } from './pageImport'
-import { sortMobileComponents, MOBILE_AVAILABLE_WIDTH } from '@/utils/mobile'
+import { MOBILE_AVAILABLE_WIDTH } from '@/utils/mobile'
 
 const STORAGE_KEY = 'marketing-editor-page'
 const GRID_SIZE = 10
@@ -180,9 +181,23 @@ export const useEditorStore = defineStore('editor', () => {
   const lastSavedAt = ref('')
   const currentDevice = ref<DeviceType>(DT.DESKTOP)
 
+  const getEffectivePageStyle = (page = currentPage.value, device = currentDevice.value): PageStyle => {
+    const base = page?.style || { width: DEVICE_PRESETS[device].width, height: DEVICE_PRESETS[device].height, backgroundColor: '#f9fafb' }
+    const overrides = page?.responsiveOverrides?.[device] || {}
+    if (device === DT.MOBILE) {
+      return {
+        ...base,
+        ...overrides,
+        width: overrides.width ?? DEVICE_PRESETS[DT.MOBILE].width,
+        height: overrides.height ?? DEVICE_PRESETS[DT.MOBILE].height
+      }
+    }
+    return { ...base, ...overrides }
+  }
+
   const devicePresets = DEVICE_PRESETS
-  const currentDeviceWidth = computed(() => DEVICE_PRESETS[currentDevice.value].width)
-  const currentDeviceHeight = computed(() => DEVICE_PRESETS[currentDevice.value].height)
+  const currentDeviceWidth = computed(() => getEffectivePageStyle().width)
+  const currentDeviceHeight = computed(() => getEffectivePageStyle().height)
 
   const touchPageMeta = () => {
     if (!currentPage.value) return
@@ -288,10 +303,6 @@ export const useEditorStore = defineStore('editor', () => {
       // 差量覆盖：仅保存与桌面端基础样式不同的字段，避免把完整桌面样式固化为移动端覆盖
       const baseStyle = component.style
       const delta: Partial<ComponentStyle> = {}
-
-      // 结构性字段：position 和 order 是移动端流式布局特有，始终保留
-      if (nextStyle.position !== undefined) delta.position = nextStyle.position
-      if (nextStyle.order !== undefined) delta.order = nextStyle.order
 
       // 视觉/尺寸字段：仅当与桌面端基础样式不同时才保存
       const deltaKeys: Array<keyof ComponentStyle> = [
@@ -489,9 +500,17 @@ export const useEditorStore = defineStore('editor', () => {
 
   const updatePageStyle = (styleUpdates: Partial<PageData['style']>) => {
     if (!currentPage.value) return
-    currentPage.value.style = {
-      ...currentPage.value.style,
-      ...styleUpdates
+    if (currentDevice.value === DT.DESKTOP) {
+      currentPage.value.style = {
+        ...currentPage.value.style,
+        ...styleUpdates
+      }
+    } else {
+      if (!currentPage.value.responsiveOverrides) currentPage.value.responsiveOverrides = {}
+      currentPage.value.responsiveOverrides[DT.MOBILE] = {
+        ...currentPage.value.responsiveOverrides[DT.MOBILE],
+        ...styleUpdates
+      }
     }
     touchPageMeta()
   }
@@ -540,8 +559,7 @@ export const useEditorStore = defineStore('editor', () => {
       const nextOverrides = {
         ...prevOverrides,
         left: Math.min(MOBILE_AVAILABLE_WIDTH - width + 12, Math.max(12, eff.left + deltaX)),
-        top: Math.max(12, eff.top + deltaY),
-        position: 'absolute' as const
+        top: Math.max(12, eff.top + deltaY)
       }
       commitComponentStyle(componentId, nextOverrides, prevOverrides)
       return
@@ -551,43 +569,6 @@ export const useEditorStore = defineStore('editor', () => {
       ...component.style,
       left: Math.max(0, component.style.left + deltaX),
       top: Math.max(0, component.style.top + deltaY)
-    })
-  }
-
-  const commitMobileOrderChange = (
-    beforeSnapshots: Record<string, Partial<ComponentStyle>>,
-    afterSnapshots: Record<string, Partial<ComponentStyle>>
-  ) => {
-    if (!currentPage.value) return
-    if (JSON.stringify(beforeSnapshots) === JSON.stringify(afterSnapshots)) return
-    useHistoryStore().executeCommand({
-      label: '拖拽调整手机端顺序',
-      execute: () => {
-        if (!currentPage.value) return
-        for (const comp of currentPage.value.components) {
-          const after = afterSnapshots[comp.id]
-          if (!comp.responsiveOverrides) comp.responsiveOverrides = {}
-          if (after && Object.keys(after).length > 0) {
-            comp.responsiveOverrides.mobile = clone(after)
-          } else {
-            delete comp.responsiveOverrides.mobile
-          }
-        }
-        touchPageMeta()
-      },
-      undo: () => {
-        if (!currentPage.value) return
-        for (const comp of currentPage.value.components) {
-          const before = beforeSnapshots[comp.id]
-          if (!comp.responsiveOverrides) comp.responsiveOverrides = {}
-          if (before && Object.keys(before).length > 0) {
-            comp.responsiveOverrides.mobile = clone(before)
-          } else {
-            delete comp.responsiveOverrides.mobile
-          }
-        }
-        touchPageMeta()
-      }
     })
   }
 
@@ -609,7 +590,6 @@ export const useEditorStore = defineStore('editor', () => {
     addComponent,
     selectComponent,
     commitComponentStyle,
-    commitMobileOrderChange,
     applyComponentStyle,
     commitComponentProps,
     commitComponentEvents,
@@ -621,6 +601,7 @@ export const useEditorStore = defineStore('editor', () => {
     importPageData,
     nudgeComponent,
     getEffectiveStyle,
+    getEffectivePageStyle,
     setCanvasScale: (scale: number) => {
       deviceCanvasScales.value[currentDevice.value] = scale
       initializedDeviceScales.value[currentDevice.value] = true

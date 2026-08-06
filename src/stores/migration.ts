@@ -3,10 +3,10 @@ import type { ComponentData, PageData } from '@/types'
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 
 /** 当前最新 schema 版本 */
-export const SCHEMA_VERSION = '2026.04'
+export const SCHEMA_VERSION = '2026.05'
 
 /** 按时间顺序排列的所有版本号 */
-const VERSIONS = ['2026.01', '2026.02', '2026.03', '2026.04']
+const VERSIONS = ['2026.01', '2026.02', '2026.03', '2026.04', '2026.05']
 const INITIAL_VERSION = '2026.01'
 
 type MigrationFn = (data: PageData) => PageData
@@ -113,6 +113,16 @@ registerComponentMigration('2026.02', (comp) => {
 registerComponentMigration('2026.03', (comp) => {
   if (!comp.responsiveOverrides) {
     comp.responsiveOverrides = {}
+  }
+  return comp
+})
+
+// 2026.04 → 2026.05: 移除移动端流式布局遗留字段，统一为自由绝对定位。
+registerComponentMigration('2026.04', (comp) => {
+  const mobile = comp.responsiveOverrides?.mobile as Record<string, unknown> | undefined
+  if (mobile) {
+    delete mobile.position
+    delete mobile.order
   }
   return comp
 })

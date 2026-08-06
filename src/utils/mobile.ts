@@ -1,19 +1,10 @@
-import type { ComponentData, ComponentStyle } from '@/types'
+import type { ComponentStyle } from '@/types'
 
 export const MOBILE_DEFAULT_MIN_HEIGHT = 120
 export const MOBILE_WIDTH_THRESHOLD = 375
 export const MOBILE_PADDING = 12
-export const MOBILE_GAP = 8
 /** 移动端可用内容宽度 = 设备宽度 - 左右 padding */
 export const MOBILE_AVAILABLE_WIDTH = MOBILE_WIDTH_THRESHOLD - MOBILE_PADDING * 2
-
-/** 按 mobile order 排序组件 */
-export const sortMobileComponents = (components: ComponentData[]): ComponentData[] =>
-  [...components].sort((a, b) => {
-    const aOrder = a.responsiveOverrides?.mobile?.order ?? a.style.zIndex
-    const bOrder = b.responsiveOverrides?.mobile?.order ?? b.style.zIndex
-    return aOrder - bOrder
-  })
 
 /** 计算手机端组件包装样式 */
 export const getMobileComponentStyle = (eff: ComponentStyle) => {
@@ -36,12 +27,13 @@ export const getMobileComponentStyle = (eff: ComponentStyle) => {
 /** 计算手机端页面容器样式 */
 export const getMobilePageStyle = (opts: {
   width: number
+  height: number
   backgroundColor?: string
   backgroundImage?: string
 }) => ({
   width: `${opts.width}px`,
-  minHeight: 'auto' as const,
-  height: '812px' as const,
+  minHeight: `${opts.height}px`,
+  height: `${opts.height}px`,
   backgroundColor: opts.backgroundColor || '#ffffff',
   backgroundImage: opts.backgroundImage || 'none',
   position: 'relative' as const,

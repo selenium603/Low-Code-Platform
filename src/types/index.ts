@@ -15,8 +15,6 @@ export interface ComponentStyle {
   borderColor?: string
   borderRadius?: number
   textAlign?: 'left' | 'center' | 'right'
-  position?: 'absolute' | 'static'
-  order?: number
 }
 
 export enum DeviceType {
@@ -115,6 +113,8 @@ export interface PageStyle {
   backgroundImage?: string
 }
 
+export type PageResponsiveOverrides = Partial<Record<DeviceType, Partial<PageStyle>>>
+
 export interface PageMeta {
   title: string
   description: string
@@ -129,6 +129,7 @@ export interface PageData {
   meta: PageMeta
   components: ComponentData[]
   style: PageStyle
+  responsiveOverrides?: PageResponsiveOverrides
 }
 
 export enum ComponentType {

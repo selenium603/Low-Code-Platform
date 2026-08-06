@@ -85,7 +85,7 @@ import { useEditorStore } from '@/stores/editor'
 import type { ComponentData } from '@/types'
 import { ComponentType } from '@/types'
 import { componentRendererMap } from './components/registry'
-import { sortMobileComponents, getMobileComponentStyle, getMobilePageStyle, MOBILE_AVAILABLE_WIDTH } from '@/utils/mobile'
+import { getMobileComponentStyle, getMobilePageStyle, MOBILE_AVAILABLE_WIDTH } from '@/utils/mobile'
 
 const editorStore = useEditorStore()
 const viewportRef = ref<HTMLElement | null>(null)
@@ -100,11 +100,12 @@ const snapToGrid = computed({ get: () => editorStore.snapToGrid, set: (v) => edi
 const showGuidelines = computed({ get: () => editorStore.showGuidelines, set: (v) => editorStore.setShowGuidelines(v) })
 const currentDevice = computed(() => editorStore.currentDevice)
 const isMobile = computed(() => currentDevice.value === 'mobile')
-const pageWidth = computed(() => isMobile.value ? editorStore.currentDeviceWidth : (currentPage.value?.style.width || 1200))
-const pageHeight = computed(() => isMobile.value ? editorStore.currentDeviceHeight : (currentPage.value?.style.height || 800))
+const effectivePageStyle = computed(() => editorStore.getEffectivePageStyle())
+const pageWidth = computed(() => effectivePageStyle.value.width)
+const pageHeight = computed(() => effectivePageStyle.value.height)
 const sortedComponents = computed(() => {
   const comps = [...(currentPage.value?.components || [])]
-  return isMobile.value ? sortMobileComponents(comps) : comps.sort((a, b) => a.style.zIndex - b.style.zIndex)
+  return comps.sort((a, b) => a.style.zIndex - b.style.zIndex)
 })
 
 // scaler 占据缩放后的视觉尺寸，使布局正确反映缩放后的大小
@@ -121,14 +122,15 @@ const canvasBgStyle = computed(() => ({
   ...(isMobile.value
     ? getMobilePageStyle({
         width: pageWidth.value,
-        backgroundColor: currentPage.value?.style.backgroundColor,
-        backgroundImage: currentPage.value?.style.backgroundImage
+        height: pageHeight.value,
+        backgroundColor: effectivePageStyle.value.backgroundColor,
+        backgroundImage: effectivePageStyle.value.backgroundImage
       })
     : {
         width: `${pageWidth.value}px`,
         height: `${pageHeight.value}px`,
-        backgroundColor: currentPage.value?.style.backgroundColor || '#ffffff',
-        backgroundImage: currentPage.value?.style.backgroundImage || 'none'
+        backgroundColor: effectivePageStyle.value.backgroundColor || '#ffffff',
+        backgroundImage: effectivePageStyle.value.backgroundImage || 'none'
       }),
   minHeight: isMobile.value ? 'auto' : `${pageHeight.value}px`,
   transform: `scale(${canvasScale.value})`,
@@ -209,12 +211,12 @@ const handleDrop = (event: DragEvent) => {
   if (!componentType) return
 
   if (isMobile.value) {
-    // 手机端：新增组件时将 responsiveOverrides 纳入 addComponent 命令，撤销/重做完整
-    const maxOrder = Math.max(0, ...currentPage.value.components.map((c) => c.responsiveOverrides?.mobile?.order ?? c.style.zIndex))
-    const nextOrder = maxOrder + 1
+    const rect = backgroundRef.value.getBoundingClientRect()
+    const left = Math.max(12, align((event.clientX - rect.left) / canvasScale.value))
+    const top = Math.max(12, align((event.clientY - rect.top) / canvasScale.value))
     editorStore.addComponent(componentType, {
       responsiveOverrides: {
-        mobile: { position: 'static', order: nextOrder }
+        mobile: { left, top }
       }
     })
     return
@@ -274,7 +276,7 @@ const onDrag = (event: MouseEvent) => {
       Math.max(12, align(dragInitial.left + totalDx / canvasScale.value))
     )
     const top = Math.max(12, align(dragInitial.top + totalDy / canvasScale.value))
-    editorStore.applyComponentStyle(dragId, { left, top, position: 'absolute' })
+    editorStore.applyComponentStyle(dragId, { left, top })
     updateGuides(left, top, width, dragInitial.height)
     return
   }

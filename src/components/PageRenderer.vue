@@ -25,7 +25,7 @@ import type { ComponentData, ComponentType, PageData } from '@/types'
 import { ComponentType as ComponentTypes } from '@/types'
 import { componentRendererMap } from './components/registry'
 import { useEditorStore } from '@/stores/editor'
-import { sortMobileComponents, getMobileComponentStyle, getMobilePageStyle } from '@/utils/mobile'
+import { getMobileComponentStyle, getMobilePageStyle } from '@/utils/mobile'
 
 const props = defineProps<{
   page: PageData
@@ -36,22 +36,24 @@ const isMobile = computed(() => editorStore.currentDevice === 'mobile')
 
 const sortedComponents = computed(() => {
   const comps = [...props.page.components]
-  return isMobile.value ? sortMobileComponents(comps) : comps.sort((a, b) => a.style.zIndex - b.style.zIndex)
+  return comps.sort((a, b) => a.style.zIndex - b.style.zIndex)
 })
 
 const pageStyle = computed(() => {
+  const effective = editorStore.getEffectivePageStyle(props.page)
   if (isMobile.value) {
     return getMobilePageStyle({
-      width: editorStore.currentDeviceWidth,
-      backgroundColor: props.page.style.backgroundColor,
-      backgroundImage: props.page.style.backgroundImage
+      width: effective.width,
+      height: effective.height,
+      backgroundColor: effective.backgroundColor,
+      backgroundImage: effective.backgroundImage
     })
   }
   return {
-    width: `${props.page.style.width}px`,
-    height: `${props.page.style.height}px`,
-    backgroundColor: props.page.style.backgroundColor || '#ffffff',
-    backgroundImage: props.page.style.backgroundImage || 'none'
+    width: `${effective.width}px`,
+    height: `${effective.height}px`,
+    backgroundColor: effective.backgroundColor || '#ffffff',
+    backgroundImage: effective.backgroundImage || 'none'
   }
 })
 
