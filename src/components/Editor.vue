@@ -41,6 +41,10 @@
           <el-icon><View /></el-icon>
           预览
         </el-button>
+        <el-button @click="aiGeneratorVisible = true" type="primary">
+          <el-icon><MagicStick /></el-icon>
+          AI 生成
+        </el-button>
         <el-dropdown split-button type="success" plain @click="handleExport" @command="handleExportFormat">
           <el-icon><Download /></el-icon>
           导出
@@ -83,6 +87,7 @@
         <PageRenderer v-if="currentPage" :page="currentPage" />
       </div>
     </el-dialog>
+    <AIGenerator v-model:visible="aiGeneratorVisible" />
   </div>
 </template>
 
@@ -96,8 +101,10 @@ import ComponentPanel from './ComponentPanel.vue'
 import EditorCanvas from './EditorCanvas.vue'
 import PropertyPanel from './PropertyPanel.vue'
 import PageRenderer from './PageRenderer.vue'
-import { Document, Download, Plus, RefreshLeft, RefreshRight, Upload, View } from '@element-plus/icons-vue'
+import AIGenerator from './AIGenerator.vue'
+import { Document, Download, MagicStick, Plus, RefreshLeft, RefreshRight, Upload, View } from '@element-plus/icons-vue'
 import type { DeviceType } from '@/types'
+import { MOBILE_AVAILABLE_WIDTH, MOBILE_PADDING, MOBILE_SMALL_BREAKPOINT, MOBILE_WIDTH_THRESHOLD } from '@/utils/mobile'
 
 const switchDevice = (device: DeviceType) => {
   editorStore.setDevice(device)
@@ -107,6 +114,8 @@ const generateHTMLPage = (page: Record<string, unknown>): string => {
   const pageStyle = page.style as Record<string, unknown>
   const components = page.components as Array<Record<string, unknown>>
   const meta = page.meta as Record<string, unknown>
+  const pageResponsive = page.responsiveOverrides as Record<string, Record<string, unknown>> | undefined
+  const mobilePageOverrides = pageResponsive?.mobile || {}
 
   const escAttr = (s: string) => (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   const escJs = (s: string) => (s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -184,9 +193,14 @@ const generateHTMLPage = (page: Record<string, unknown>): string => {
   const componentsHtml = components.map(renderComponent).join('\n      ')
 
   // 与编辑器 mobile.ts 保持一致：375px 画布、12px 安全边距、绝对定位。
-  const MOBILE_WIDTH = 375
-  const MOBILE_PADDING = 12
-  const MOBILE_AVAIL_W = MOBILE_WIDTH - MOBILE_PADDING * 2
+  const MOBILE_WIDTH = MOBILE_WIDTH_THRESHOLD
+  const MOBILE_AVAIL_W = MOBILE_AVAILABLE_WIDTH
+  const MOBILE_HEIGHT = typeof mobilePageOverrides.height === 'number'
+    ? Math.max(812, mobilePageOverrides.height)
+    : 812
+  const MOBILE_BACKGROUND = typeof mobilePageOverrides.backgroundColor === 'string'
+    ? mobilePageOverrides.backgroundColor
+    : String(pageStyle.backgroundColor || '#ffffff')
 
   /** 根据组件类型返回视觉样式作用的目标选择器后缀 */
   const visualChildSelector = (type: string): string => {
@@ -216,12 +230,21 @@ const generateHTMLPage = (page: Record<string, unknown>): string => {
     const left = Math.min(MOBILE_WIDTH - MOBILE_PADDING - width, Math.max(MOBILE_PADDING, rawLeft))
     const top = Math.max(MOBILE_PADDING, rawTop)
     const zIndex = typeof eff.zIndex === 'number' ? eff.zIndex : 1
+    // 接近 351px 的组件视为手机全宽组件；导出后随真实视口宽度伸缩。
+    const isFullWidth = width >= MOBILE_AVAIL_W - 8
+    const responsiveWidth = isFullWidth
+      ? `calc(100% - ${MOBILE_PADDING * 2}px)`
+      : `min(${width}px, calc(100% - ${MOBILE_PADDING * 2}px))`
+    const responsiveLeft = isFullWidth
+      ? `${MOBILE_PADDING}px`
+      : `clamp(${MOBILE_PADDING}px, ${left}px, calc(100% - ${MOBILE_PADDING + width}px))`
 
     wrapperRules.push(
       'position:absolute !important',
-      `left:${left}px !important`,
+      `left:${responsiveLeft} !important`,
       `top:${top}px !important`,
-      `width:${width}px !important`,
+      `width:${responsiveWidth} !important`,
+      `max-width:calc(100% - ${MOBILE_PADDING * 2}px) !important`,
       `height:${height}px !important`,
       `z-index:${zIndex} !important`
     )
@@ -264,7 +287,27 @@ const generateHTMLPage = (page: Record<string, unknown>): string => {
     return css
   }).join('\n    ')
 
-  const mobileMediaQuery = `\n  @media (max-width: 768px) {\n    body{padding:16px 0;}\n    .page-container{width:${MOBILE_WIDTH}px !important;max-width:100%;height:812px !important;min-height:812px;position:relative;display:block;padding:0;box-sizing:border-box;}\n    .page-container > *{position:absolute !important;}\n    ${mobileCss}\n  }`
+  // 320~360px 小屏按视口比例收敛字体，减少因宽度变窄导致的额外换行和截断。
+  const smallScreenTypographyCss = components.flatMap((comp) => {
+    const c = comp as Record<string, unknown>
+    const sid = safeId((c.id as string) || '')
+    const type = c.type as string
+    const style = c.style as Record<string, unknown>
+    const overrides = (c.responsiveOverrides as Record<string, Record<string, unknown>> | undefined)?.mobile
+    const eff = { ...style, ...(overrides || {}) }
+    const fontSize = typeof eff.fontSize === 'number' ? eff.fontSize : 0
+    if (!fontSize || !['Text', 'Button', 'Input'].includes(type)) return []
+    const minFontSize = type === 'Text' && fontSize >= 24 ? Math.max(22, Math.round(fontSize * 0.8)) : Math.max(13, Math.round(fontSize * 0.84))
+    const fluidFontSize = Number((fontSize / MOBILE_WIDTH * 100).toFixed(3))
+    const selector = type === 'Button'
+      ? `#comp-${sid} button`
+      : type === 'Input'
+        ? `#comp-${sid} input`
+        : `#comp-${sid}`
+    return [`${selector}{font-size:clamp(${minFontSize}px, ${fluidFontSize}vw, ${fontSize}px) !important;}`]
+  }).join('\n    ')
+
+  const mobileMediaQuery = `\n  @media (max-width: 768px) {\n    body{padding:16px 0;}\n    .page-container{width:min(100%, ${MOBILE_WIDTH}px) !important;max-width:${MOBILE_WIDTH}px;height:${MOBILE_HEIGHT}px !important;min-height:${MOBILE_HEIGHT}px;background:${MOBILE_BACKGROUND} !important;position:relative;display:block;padding:0;box-sizing:border-box;}\n    .page-container > *{position:absolute !important;}\n    ${mobileCss}\n  }\n  @media (max-width: ${MOBILE_SMALL_BREAKPOINT}px) {\n    body{padding:0;}\n    .page-container{width:100% !important;max-width:none;border-radius:0;box-shadow:none;}\n    .page-container > *{max-width:calc(100% - ${MOBILE_PADDING * 2}px) !important;}\n    ${smallScreenTypographyCss}\n  }`
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -318,6 +361,7 @@ const generateHTMLPage = (page: Record<string, unknown>): string => {
 const editorStore = useEditorStore()
 const historyStore = useHistoryStore()
 const previewVisible = ref(false)
+const aiGeneratorVisible = ref(false)
 
 const handleKeyDown = (e: KeyboardEvent) => {
   if (e.ctrlKey || e.metaKey) {

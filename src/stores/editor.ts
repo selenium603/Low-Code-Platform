@@ -52,6 +52,7 @@ const createProtocolComponent = (
     props?: Record<string, unknown>
     events?: ComponentEvent[]
     name?: string
+    responsiveOverrides?: ResponsiveOverrides
   } = {}
 ): ComponentData => {
   const protocol = getComponentProtocol(type)
@@ -72,7 +73,10 @@ const createProtocolComponent = (
       ...clone(protocol.defaultProps),
       ...clone(overrides.props || {})
     } as ComponentData['props'],
-    events: clone(overrides.events || [{ type: 'click', config: { action: 'none' } }])
+    events: clone(overrides.events || [{ type: 'click', config: { action: 'none' } }]),
+    ...(overrides.responsiveOverrides
+      ? { responsiveOverrides: clone(overrides.responsiveOverrides) }
+      : {})
   }
 }
 
@@ -80,33 +84,51 @@ const createStarterComponents = (): ComponentData[] => [
   createProtocolComponent(ComponentType.TEXT, {
     name: '主标题',
     style: { top: 72, left: 72, width: 420, height: 80, fontSize: 36, fontWeight: 700, color: '#111827' },
-    props: { content: '2026 春季增长活动，限时开启' }
+    props: { content: '2026 春季增长活动，限时开启' },
+    responsiveOverrides: {
+      [DT.MOBILE]: { top: 24, left: 12, width: MOBILE_AVAILABLE_WIDTH, height: 88, fontSize: 30, lineHeight: 1.25, rotate: 0 }
+    }
   }),
   createProtocolComponent(ComponentType.TEXT, {
     name: '卖点描述',
     style: { top: 162, left: 72, width: 420, height: 72, fontSize: 16, fontWeight: 400, color: '#4b5563' },
-    props: { content: '低代码搭建营销落地页，支持拖拽布局、图层管理、属性配置、实时预览与页面 JSON 导入导出。' }
+    props: { content: '低代码搭建营销落地页，支持拖拽布局、图层管理、属性配置、实时预览与页面 JSON 导入导出。' },
+    responsiveOverrides: {
+      [DT.MOBILE]: { top: 144, left: 12, width: MOBILE_AVAILABLE_WIDTH, height: 96, fontSize: 16, lineHeight: 1.6, rotate: 0 }
+    }
   }),
   createProtocolComponent(ComponentType.BUTTON, {
     name: '主 CTA',
     style: { top: 258, left: 72, width: 180, height: 46, backgroundColor: '#2563eb', borderColor: '#2563eb' },
     props: { content: '立即报名' },
-    events: [{ type: 'click', config: { action: 'url', url: 'https://example.com', newTab: true } }]
+    events: [{ type: 'click', config: { action: 'url', url: 'https://example.com', newTab: true } }],
+    responsiveOverrides: {
+      [DT.MOBILE]: { top: 604, left: 12, width: MOBILE_AVAILABLE_WIDTH, height: 52, rotate: 0 }
+    }
   }),
   createProtocolComponent(ComponentType.INPUT, {
     name: '手机号输入',
     style: { top: 258, left: 270, width: 220, height: 46, backgroundColor: '#ffffff', borderColor: '#d1d5db' },
-    props: { placeholder: '请输入手机号', inputType: 'tel' }
+    props: { placeholder: '请输入手机号', inputType: 'tel' },
+    responsiveOverrides: {
+      [DT.MOBILE]: { top: 524, left: 12, width: MOBILE_AVAILABLE_WIDTH, height: 48, rotate: 0 }
+    }
   }),
   createProtocolComponent(ComponentType.IMAGE, {
     name: '活动主视觉',
     style: { top: 348, left: 72, width: 420, height: 240, backgroundColor: '#f3f4f6', borderRadius: 18 },
-    props: { src: '', alt: '活动主视觉', objectFit: 'cover' }
+    props: { src: '', alt: '活动主视觉', objectFit: 'cover' },
+    responsiveOverrides: {
+      [DT.MOBILE]: { top: 272, left: 12, width: MOBILE_AVAILABLE_WIDTH, height: 220, borderRadius: 16, rotate: 0 }
+    }
   }),
   createProtocolComponent(ComponentType.FORM, {
     name: '报名表单',
     style: { top: 96, left: 600, width: 360, height: 420, backgroundColor: '#ffffff', borderColor: '#e5e7eb' },
-    props: { title: '活动报名信息', submitText: '提交线索' }
+    props: { title: '活动报名信息', submitText: '提交线索' },
+    responsiveOverrides: {
+      [DT.MOBILE]: { top: 688, left: 12, width: MOBILE_AVAILABLE_WIDTH, height: 460, borderRadius: 16, rotate: 0 }
+    }
   })
 ].map((item, index) => ({
   ...item,
@@ -125,6 +147,13 @@ const createDefaultPage = (title = '营销活动页'): PageData => ({
     height: 820,
     backgroundColor: '#f9fafb',
     backgroundImage: ''
+  },
+  responsiveOverrides: {
+    [DT.MOBILE]: {
+      width: 375,
+      height: 1172,
+      backgroundColor: '#f8fafc'
+    }
   }
 })
 
@@ -180,6 +209,8 @@ export const useEditorStore = defineStore('editor', () => {
   const showGuidelines = ref(true)
   const lastSavedAt = ref('')
   const currentDevice = ref<DeviceType>(DT.DESKTOP)
+  // 单调递增的编辑修订号用于防止 AI 响应覆盖请求期间发生的手工修改。
+  const pageRevision = ref(0)
 
   const getEffectivePageStyle = (page = currentPage.value, device = currentDevice.value): PageStyle => {
     const base = page?.style || { width: DEVICE_PRESETS[device].width, height: DEVICE_PRESETS[device].height, backgroundColor: '#f9fafb' }
@@ -202,12 +233,14 @@ export const useEditorStore = defineStore('editor', () => {
   const touchPageMeta = () => {
     if (!currentPage.value) return
     currentPage.value.meta.updatedAt = new Date().toISOString()
+    pageRevision.value += 1
   }
 
   const createNewPage = (title = '营销活动页') => {
     currentPage.value = normalizePageData(createDefaultPage(title))
     currentComponent.value = null
     lastSavedAt.value = ''
+    pageRevision.value = 0
     persistPage()
   }
 
@@ -496,6 +529,7 @@ export const useEditorStore = defineStore('editor', () => {
       ...metaUpdates,
       updatedAt: new Date().toISOString()
     }
+    pageRevision.value += 1
   }
 
   const updatePageStyle = (styleUpdates: Partial<PageData['style']>) => {
@@ -522,8 +556,57 @@ export const useEditorStore = defineStore('editor', () => {
     const parsed = normalizePageData(page)
     currentPage.value = parsed
     currentComponent.value = null
+    pageRevision.value = 0
     touchPageMeta()
     return warnings
+  }
+
+  /**
+   * 将 AI 返回的对象直接导入编辑器。和 JSON 导入共用同一套修复逻辑，
+   * 但额外要求结果至少包含一个可渲染组件，避免“接口成功、画布为空”。
+   */
+  const importGeneratedPage = (payload: unknown) => {
+    const { page, warnings } = validateAndRepairPageData(payload)
+    const parsed = normalizePageData(page)
+    const firstComponent = parsed.components[0]
+    if (!firstComponent) {
+      throw new Error('AI 返回的页面没有可渲染组件，请补充页面结构后重新生成。')
+    }
+
+    currentPage.value = parsed
+    currentComponent.value = firstComponent
+    pageRevision.value = 0
+    touchPageMeta()
+    return { warnings, componentCount: parsed.components.length }
+  }
+
+  /** 将已在副本中校验通过的 AI Patch 作为单条命令提交，保证一次撤销完整恢复。 */
+  const applyAIPagePatchTransaction = (nextPage: PageData, summary: string, baseRevision: number) => {
+    if (!currentPage.value) throw new Error('当前没有可修改的页面。')
+    if (pageRevision.value !== baseRevision) {
+      throw new Error('AI 处理期间页面已发生修改。为避免覆盖手工操作，请重新发送这条要求。')
+    }
+
+    const before = clone(currentPage.value)
+    const after = normalizePageData(clone(nextPage))
+    const selectedId = currentComponent.value?.id
+    useHistoryStore().executeCommand({
+      label: `AI 修改：${summary}`,
+      execute: () => {
+        currentPage.value = clone(after)
+        currentComponent.value = selectedId
+          ? currentPage.value.components.find((item) => item.id === selectedId) || null
+          : null
+        touchPageMeta()
+      },
+      undo: () => {
+        currentPage.value = clone(before)
+        currentComponent.value = selectedId
+          ? currentPage.value.components.find((item) => item.id === selectedId) || null
+          : null
+        touchPageMeta()
+      }
+    })
   }
 
   const persistPage = () => {
@@ -542,6 +625,7 @@ export const useEditorStore = defineStore('editor', () => {
     try {
       currentPage.value = normalizePageData(JSON.parse(raw) as PageData)
       currentComponent.value = null
+      pageRevision.value = 0
     } catch {
       createNewPage()
     }
@@ -581,6 +665,7 @@ export const useEditorStore = defineStore('editor', () => {
     showGuidelines: computed(() => showGuidelines.value),
     lastSavedAt: computed(() => lastSavedAt.value),
     currentDevice: computed(() => currentDevice.value),
+    pageRevision: computed(() => pageRevision.value),
     devicePresets,
     currentDeviceWidth,
     currentDeviceHeight,
@@ -599,6 +684,8 @@ export const useEditorStore = defineStore('editor', () => {
     updatePageStyle,
     exportPageData,
     importPageData,
+    importGeneratedPage,
+    applyAIPagePatchTransaction,
     nudgeComponent,
     getEffectiveStyle,
     getEffectivePageStyle,

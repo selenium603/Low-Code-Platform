@@ -124,7 +124,9 @@ const canvasBgStyle = computed(() => ({
         width: pageWidth.value,
         height: pageHeight.value,
         backgroundColor: effectivePageStyle.value.backgroundColor,
-        backgroundImage: effectivePageStyle.value.backgroundImage
+        backgroundImage: effectivePageStyle.value.backgroundImage,
+        // scaler 已经负责编辑器缩放，画布内部保持完整逻辑宽度，避免二次压缩。
+        fluid: false
       })
     : {
         width: `${pageWidth.value}px`,
@@ -502,6 +504,13 @@ onMounted(async () => {
 
 watch([pageWidth, pageHeight], () => {
   fitToViewport()
+})
+
+// 导入或 AI 替换整页时，组件数量和画布尺寸可能恰好与旧页面一致。
+// 监听页面 ID 可确保画布在这种情况下也会重新计算缩放并渲染新页面。
+watch(() => currentPage.value?.id, async () => {
+  await nextTick()
+  await fitToViewport(true)
 })
 
 // 手机端画布高度为 auto，组件增删会改变实际高度，需重新测量与适配
