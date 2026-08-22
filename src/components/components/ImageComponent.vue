@@ -17,7 +17,8 @@
       :style="{
         width: '100%',
         height: '100%',
-        objectFit: imageProps.objectFit || 'fill'
+        objectFit: imageProps.objectFit || 'fill',
+        objectPosition: 'center center'
       }"
     />
     <div v-else class="image-placeholder">
@@ -41,26 +42,33 @@ const imageProps = computed(() => props.component.props as ImageProps)
 
 <style scoped>
 .image-component {
+  position: relative;
   width: 100%;
   height: 100%;
-  min-height: 100px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
 }
 
 .image-placeholder {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   color: #999;
   font-size: 12px;
-  padding: 24px 16px;
-  min-height: 100px;
+  padding: 8px;
+  box-sizing: border-box;
 }
 
 .image-content {
+  position: absolute;
+  inset: 0;
   display: block;
+  max-width: none;
+  max-height: none;
 }
 </style>

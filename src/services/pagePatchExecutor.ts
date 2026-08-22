@@ -6,6 +6,7 @@ import { validateAndRepairPageData } from '@/stores/pageImport'
 import { SCHEMA_VERSION } from '@/stores/migration'
 import { MOBILE_AVAILABLE_WIDTH, MOBILE_PADDING, MOBILE_WIDTH_THRESHOLD } from '@/utils/mobile'
 import { estimateTextHeight } from '@/utils/textLayout'
+import { getFormMinimumHeight } from '@/utils/formLayout'
 
 type UnknownRecord = Record<string, unknown>
 
@@ -77,9 +78,10 @@ const applyStyle = (component: ComponentData, device: DeviceType, changes: Parti
 }
 
 const clampComponent = (component: ComponentData, page: PageData, device: DeviceType) => {
+  const minimumHeight = component.type === ComponentType.FORM ? getFormMinimumHeight(component.props) : 40
   if (device === DeviceType.DESKTOP) {
     component.style.width = Math.min(page.style.width, Math.max(40, component.style.width))
-    component.style.height = Math.min(page.style.height, Math.max(40, component.style.height))
+    component.style.height = Math.min(page.style.height, Math.max(minimumHeight, component.style.height))
     component.style.left = Math.max(0, Math.min(component.style.left, page.style.width - component.style.width))
     component.style.top = Math.max(0, Math.min(component.style.top, page.style.height - component.style.height))
     return
@@ -92,7 +94,7 @@ const clampComponent = (component: ComponentData, page: PageData, device: Device
     width,
     left,
     top: Math.max(MOBILE_PADDING, current.top),
-    height: Math.max(40, current.height),
+    height: Math.max(minimumHeight, current.height),
     rotate: 0
   })
 }
@@ -262,6 +264,14 @@ const updateProps = (page: PageData, operation: Extract<AIPageOperation, { op: '
     applyStyle(component, DeviceType.MOBILE, {
       height: Math.max(mobile.height, estimateTextHeight(content, mobile.width, mobile.fontSize, mobile.lineHeight))
     })
+    placeAddedComponentSafely(component, page, DeviceType.DESKTOP)
+    placeAddedComponentSafely(component, page, DeviceType.MOBILE)
+  }
+  if (component.type === ComponentType.FORM && 'fields' in operation.changes) {
+    const minimumHeight = getFormMinimumHeight(component.props)
+    component.style.height = Math.max(component.style.height, minimumHeight)
+    const mobile = effectiveStyle(component, DeviceType.MOBILE)
+    applyStyle(component, DeviceType.MOBILE, { height: Math.max(mobile.height, minimumHeight) })
     placeAddedComponentSafely(component, page, DeviceType.DESKTOP)
     placeAddedComponentSafely(component, page, DeviceType.MOBILE)
   }

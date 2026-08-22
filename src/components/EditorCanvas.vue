@@ -88,6 +88,7 @@ import type { ComponentData } from '@/types'
 import { ComponentType } from '@/types'
 import { componentRendererMap } from './components/registry'
 import { getMobileComponentStyle, getMobilePageStyle, MOBILE_AVAILABLE_WIDTH } from '@/utils/mobile'
+import { getFormMinimumHeight } from '@/utils/formLayout'
 
 const editorStore = useEditorStore()
 const viewportRef = ref<HTMLElement | null>(null)
@@ -170,6 +171,10 @@ const wrapperStyle = (component: ComponentData) => {
   }
 }
 const align = (value: number) => snapToGrid.value ? Math.round(value / editorStore.GRID_SIZE) * editorStore.GRID_SIZE : value
+// 缩放时吸附鼠标位移而不是最终宽高，避免非网格尺寸在首次 mousemove 时突然跳动。
+const alignDelta = (value: number) => snapToGrid.value
+  ? Math.round(value / editorStore.GRID_SIZE) * editorStore.GRID_SIZE
+  : value
 const clearGuides = () => { guides.value = { x: [], y: [] } }
 // 只收集当前操作组件之外的有效矩形；画布边界不属于“组件对齐”。
 const getOtherRects = (activeComponentId: string) => {
@@ -363,6 +368,8 @@ let resizeStartX = 0
 let resizeStartY = 0
 let resizeInitial: ComponentData['style'] | null = null
 let resizeInitialOverrides: Partial<ComponentData['style']> | null = null
+let resizeMinimumWidth = 40
+let resizeMinimumHeight = 40
 
 const beginResize = (component: ComponentData, direction: string, event: MouseEvent) => {
   if (event.button !== 0) return
@@ -371,8 +378,24 @@ const beginResize = (component: ComponentData, direction: string, event: MouseEv
   resizeId = component.id
   resizeDir = direction
   const effStyle = getEffectiveStyle(component)
-  resizeInitial = JSON.parse(JSON.stringify(toRaw(effStyle)))
+  // 手机渲染层会把继承自桌面的超宽尺寸收敛到 351px；缩放快照必须使用
+  // 用户实际看到的几何尺寸，否则首次移动会从桌面宽度跳回手机宽度。
+  const visibleStyle = isMobile.value
+    ? {
+        ...effStyle,
+        width: Math.min(MOBILE_AVAILABLE_WIDTH, Math.max(40, effStyle.width)),
+        height: effStyle.height > 40 ? effStyle.height : 120,
+        left: Math.min(
+          pageWidth.value - 12 - Math.min(MOBILE_AVAILABLE_WIDTH, Math.max(40, effStyle.width)),
+          Math.max(12, effStyle.left)
+        ),
+        top: Math.max(12, effStyle.top)
+      }
+    : effStyle
+  resizeInitial = JSON.parse(JSON.stringify(toRaw(visibleStyle)))
   resizeInitialOverrides = JSON.parse(JSON.stringify(toRaw(component.responsiveOverrides?.mobile || {})))
+  resizeMinimumWidth = component.type === ComponentType.FORM ? 320 : 40
+  resizeMinimumHeight = component.type === ComponentType.FORM ? getFormMinimumHeight(component.props) : 40
   resizeStartX = event.clientX
   resizeStartY = event.clientY
   document.body.style.userSelect = 'none'
@@ -383,40 +406,49 @@ const beginResize = (component: ComponentData, direction: string, event: MouseEv
 
 const onResize = (event: MouseEvent) => {
   if (!resizeId || !resizeInitial) return
-  const dx = (event.clientX - resizeStartX) / canvasScale.value
-  const dy = (event.clientY - resizeStartY) / canvasScale.value
-  if (isMobile.value) {
-    // 手机端：右/下拖拽增大，左/上拖拽减小，对角线同时调
-    const updates: Partial<ComponentData['style']> = {}
-    if (resizeDir.includes('r')) {
-      const baseWidth = resizeInitial.width || 375
-      updates.width = Math.min(MOBILE_AVAILABLE_WIDTH, Math.max(40, align(baseWidth + dx)))
-    } else if (resizeDir.includes('l')) {
-      const baseWidth = resizeInitial.width || 375
-      const width = Math.min(MOBILE_AVAILABLE_WIDTH, Math.max(40, align(baseWidth - dx)))
-      updates.width = width
-      updates.left = Math.max(12, align(resizeInitial.left + (baseWidth - width)))
-    }
-    if (resizeDir.includes('b')) {
-      const baseHeight = resizeInitial.height || 120
-      updates.height = Math.max(40, align(baseHeight + dy))
-    } else if (resizeDir.includes('t')) {
-      const baseHeight = resizeInitial.height || 120
-      const height = Math.max(40, align(baseHeight - dy))
-      updates.height = height
-      updates.top = Math.max(12, align(resizeInitial.top + (baseHeight - height)))
-    }
-    if (Object.keys(updates).length > 0) {
-      editorStore.applyComponentStyle(resizeId, updates)
-    }
-    return
+  const pointerDx = (event.clientX - resizeStartX) / canvasScale.value
+  const pointerDy = (event.clientY - resizeStartY) / canvasScale.value
+  const angle = (resizeInitial.rotate || 0) * Math.PI / 180
+  // 控制点随组件旋转，鼠标位移需先转换回组件自身坐标系。
+  const dx = alignDelta(pointerDx * Math.cos(angle) + pointerDy * Math.sin(angle))
+  const dy = alignDelta(-pointerDx * Math.sin(angle) + pointerDy * Math.cos(angle))
+  const minimumLeft = isMobile.value ? 12 : 0
+  const minimumTop = isMobile.value ? 12 : 0
+  const maximumRight = isMobile.value ? pageWidth.value - 12 : pageWidth.value
+  const maximumBottom = isMobile.value ? pageHeight.value - 12 : pageHeight.value
+  const initialRight = resizeInitial.left + resizeInitial.width
+  const initialBottom = resizeInitial.top + resizeInitial.height
+  const rotated = Math.abs(resizeInitial.rotate || 0) > 0.01
+
+  let width = resizeInitial.width
+  let height = resizeInitial.height
+  if (resizeDir.includes('r')) {
+    const maxWidth = rotated ? maximumRight - minimumLeft : maximumRight - resizeInitial.left
+    width = Math.min(maxWidth, Math.max(resizeMinimumWidth, resizeInitial.width + dx))
+  } else if (resizeDir.includes('l')) {
+    const maxWidth = rotated ? maximumRight - minimumLeft : initialRight - minimumLeft
+    width = Math.min(maxWidth, Math.max(resizeMinimumWidth, resizeInitial.width - dx))
   }
-  let { left, top, width, height } = resizeInitial
-  if (resizeDir.includes('l')) { width = Math.max(40, resizeInitial.width - dx); left = resizeInitial.left + (resizeInitial.width - width) }
-  if (resizeDir.includes('r')) width = Math.max(40, resizeInitial.width + dx)
-  if (resizeDir.includes('t')) { height = Math.max(40, resizeInitial.height - dy); top = resizeInitial.top + (resizeInitial.height - height) }
-  if (resizeDir.includes('b')) height = Math.max(40, resizeInitial.height + dy)
-  left = Math.max(0, align(left)); top = Math.max(0, align(top)); width = align(width); height = align(height)
+  if (resizeDir.includes('b')) {
+    const maxHeight = rotated ? maximumBottom - minimumTop : maximumBottom - resizeInitial.top
+    height = Math.min(maxHeight, Math.max(resizeMinimumHeight, resizeInitial.height + dy))
+  } else if (resizeDir.includes('t')) {
+    const maxHeight = rotated ? maximumBottom - minimumTop : initialBottom - minimumTop
+    height = Math.min(maxHeight, Math.max(resizeMinimumHeight, resizeInitial.height - dy))
+  }
+
+  const widthDelta = width - resizeInitial.width
+  const heightDelta = height - resizeInitial.height
+  const localCenterShiftX = resizeDir.includes('l') ? -widthDelta / 2 : resizeDir.includes('r') ? widthDelta / 2 : 0
+  const localCenterShiftY = resizeDir.includes('t') ? -heightDelta / 2 : resizeDir.includes('b') ? heightDelta / 2 : 0
+  const worldCenterShiftX = localCenterShiftX * Math.cos(angle) - localCenterShiftY * Math.sin(angle)
+  const worldCenterShiftY = localCenterShiftX * Math.sin(angle) + localCenterShiftY * Math.cos(angle)
+  let left = resizeInitial.left + resizeInitial.width / 2 + worldCenterShiftX - width / 2
+  let top = resizeInitial.top + resizeInitial.height / 2 + worldCenterShiftY - height / 2
+
+  // 非旋转组件已经按固定对侧锚点限制尺寸，此处只消除浮点误差；旋转组件再做安全边界兜底。
+  left = Math.max(minimumLeft, Math.min(maximumRight - width, left))
+  top = Math.max(minimumTop, Math.min(maximumBottom - height, top))
   editorStore.applyComponentStyle(resizeId, { left, top, width, height })
   updateGuides(left, top, width, height, resizeId)
 }
@@ -445,6 +477,8 @@ const stopResize = () => {
   resizeDir = ''
   resizeInitial = null
   resizeInitialOverrides = null
+  resizeMinimumWidth = 40
+  resizeMinimumHeight = 40
   clearGuides()
   document.body.style.userSelect = ''
   document.body.style.cursor = ''

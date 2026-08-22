@@ -1,6 +1,7 @@
 import { ComponentType, DeviceType } from '@/types'
 import type { ComponentData, ComponentProtocol, ComponentStyle, FormField, PageData, ResponsiveOverrides } from '@/types'
 import { getComponentProtocol } from '@/components/components/registry'
+import { getFormMinimumHeight } from '@/utils/formLayout'
 
 type UnknownRecord = Record<string, unknown>
 
@@ -187,6 +188,8 @@ const repairComponent = (value: unknown, index: number, warnings: string[]): Com
   }
 
   const style = repairStyle(protocol, value.style)
+  const props = repairProps(protocol, value.props, warnings)
+  const responsiveOverrides = repairResponsiveOverrides(value.responsiveOverrides)
   // 兼容 2026.01 的 Button.props.color：旧数据把背景色放在 props 中。
   if (
     type === ComponentType.BUTTON &&
@@ -197,6 +200,16 @@ const repairComponent = (value: unknown, index: number, warnings: string[]): Com
     style.backgroundColor = value.props.color
     warnings.push(`组件“${protocol.label}”使用了旧版颜色字段，已迁移到样式配置。`)
   }
+  if (type === ComponentType.FORM) {
+    const minimumHeight = getFormMinimumHeight(props)
+    style.height = Math.max(style.height, minimumHeight)
+    if (responsiveOverrides?.mobile) {
+      responsiveOverrides.mobile.height = Math.max(
+        Number(responsiveOverrides.mobile.height) || style.height,
+        minimumHeight
+      )
+    }
+  }
 
   return {
     id: typeof value.id === 'string' && value.id ? sanitizeComponentId(value.id, componentId(index)) : componentId(index),
@@ -204,7 +217,7 @@ const repairComponent = (value: unknown, index: number, warnings: string[]): Com
     name: typeof value.name === 'string' && value.name ? value.name : protocol.label,
     schemaVersion: typeof value.schemaVersion === 'string' ? value.schemaVersion : '2026.01',
     style,
-    props: repairProps(protocol, value.props, warnings),
+    props,
     events: Array.isArray(value.events)
       ? value.events.filter((event) => isRecord(event) && event.type === 'click' && isRecord(event.config)).map((event) => ({
           type: 'click' as const,
@@ -218,8 +231,8 @@ const repairComponent = (value: unknown, index: number, warnings: string[]): Com
           }
         }))
       : [{ type: 'click', config: { action: 'none' } }],
-    ...(repairResponsiveOverrides(value.responsiveOverrides)
-      ? { responsiveOverrides: repairResponsiveOverrides(value.responsiveOverrides) }
+    ...(responsiveOverrides
+      ? { responsiveOverrides }
       : {})
   }
 }

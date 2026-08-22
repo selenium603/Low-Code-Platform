@@ -6,6 +6,9 @@ import vueDevTools from 'vite-plugin-vue-devtools'
 import { retrieveComponentsWithRag, type RagComponentIndexItem } from './server/componentRag'
 import { createLargeEditPlan, shouldPlanLargeEdit } from './server/largeEditPlan'
 import { estimateTextHeight } from './src/utils/textLayout'
+import { getFormMinimumHeight } from './src/utils/formLayout'
+
+const DEFAULT_PLANNED_FORM_MIN_HEIGHT = getFormMinimumHeight({ fields: [{}, {}, {}] })
 
 // https://vite.dev/config/
 const aiPageGenerator = (): Plugin => ({
@@ -125,7 +128,7 @@ const normalizeLayoutPlan = (plan: LayoutPlan) => {
     const bounds = item.bounds
     if (!Number.isFinite(bounds.left) || !Number.isFinite(bounds.top)) continue
     const width = Math.min(1120, Math.max(320, Number(bounds.width) || 360))
-    const height = Math.min(740, Math.max(420, Number(bounds.height) || 460))
+    const height = Math.min(740, Math.max(DEFAULT_PLANNED_FORM_MIN_HEIGHT, Number(bounds.height) || DEFAULT_PLANNED_FORM_MIN_HEIGHT))
     bounds.width = width
     bounds.height = height
     bounds.left = Math.min(1160 - width, Math.max(40, Number(bounds.left)))
@@ -196,8 +199,9 @@ const basicPageError = (page: GeneratedPage): string | null => {
     const height = style.height as number
     const opacity = style.opacity as number
     if (width <= 0 || height <= 0 || opacity <= 0 || opacity > 1) return `组件 ${String(component.id)} 的尺寸或透明度无效。`
-    if (component.type === 'Form' && (width < 320 || height < 420)) {
-      return `表单组件 ${String(component.id)} 必须至少为 320x420，避免导入后自动扩展并破坏布局。`
+    const formMinimumHeight = component.type === 'Form' ? getFormMinimumHeight(component.props) : 0
+    if (component.type === 'Form' && (width < 320 || height < formMinimumHeight)) {
+      return `表单组件 ${String(component.id)} 当前字段数量要求尺寸至少为 320x${formMinimumHeight}，避免导入后自动扩展并破坏布局。`
     }
     const decorative = isDecorativeImage(component, style)
     // 内容组件保留 40px 安全边距；受控的底层装饰图可延伸至实际画布边缘。
@@ -279,7 +283,8 @@ const normalizeForms = (page: GeneratedPage) => {
     if (component.type !== 'Form' || !style) continue
     if (!Number.isFinite(style.left) || !Number.isFinite(style.top)) continue
     const width = Math.min(1120, Math.max(320, Number(style.width) || 360))
-    const height = Math.min(740, Math.max(420, Number(style.height) || 460))
+    const minimumHeight = getFormMinimumHeight(component.props)
+    const height = Math.min(740, Math.max(minimumHeight, Number(style.height) || minimumHeight))
     style.width = width
     style.height = height
     style.left = Math.min(1160 - width, Math.max(40, Number(style.left)))
@@ -323,7 +328,7 @@ function normalizeContentLayout(page: GeneratedPage) {
       Image: { minWidth: 280, maxWidth: 720, minHeight: 180, maxHeight: 460, scaleHeight: true },
       Button: { minWidth: 144, maxWidth: 360, minHeight: 44, maxHeight: 64, scaleHeight: false },
       Input: { minWidth: 240, maxWidth: 440, minHeight: 44, maxHeight: 64, scaleHeight: false },
-      Form: { minWidth: 320, maxWidth: 440, minHeight: 420, maxHeight: 600, scaleHeight: true },
+      Form: { minWidth: 320, maxWidth: 440, minHeight: getFormMinimumHeight(component.props), maxHeight: 740, scaleHeight: true },
       Chart: { minWidth: 320, maxWidth: 640, minHeight: 240, maxHeight: 360, scaleHeight: true }
     }
     const limit = limits[type] || { minWidth: 80, maxWidth: 720, minHeight: 40, maxHeight: 460, scaleHeight: true }
@@ -448,10 +453,8 @@ const getMobileComponentHeight = (
   const requested = Number.isFinite(mobile.height) ? Number(mobile.height) : 0
   const type = String(component.type)
   if (type === 'Form') {
-    const props = isRecord(component.props) ? component.props : {}
-    const fields = Array.isArray(props.fields) ? props.fields.length : 0
-    const fallback = Math.max(420, 160 + fields * 68)
-    return Math.min(680, Math.max(420, requested || fallback))
+    const minimumHeight = getFormMinimumHeight(component.props)
+    return Math.max(minimumHeight, requested || minimumHeight)
   }
   if (type === 'Chart') return Math.min(340, Math.max(240, requested || 280))
   if (type === 'Image') return Math.min(300, Math.max(180, requested || 220))
@@ -582,7 +585,10 @@ const mobilePageError = (page: GeneratedPage): string | null => {
     if (rect.left < 12 || rect.left + rect.width > 363 || rect.top < 12 || rect.top + rect.height > Number(mobilePage.height) - 12) {
       return `组件 ${rect.id} 超出手机端页面边界。`
     }
-    if (component.type === 'Form' && rect.height < 420) return `表单组件 ${rect.id} 的手机端高度必须至少为 420px。`
+    const formMinimumHeight = component.type === 'Form' ? getFormMinimumHeight(component.props) : 0
+    if (component.type === 'Form' && rect.height < formMinimumHeight) {
+      return `表单组件 ${rect.id} 当前字段数量要求手机端高度至少为 ${formMinimumHeight}px。`
+    }
     const conflict = rectangles.find((other) => overlapsWithGap(rect, other, 16))
     if (conflict) return `手机端组件 ${conflict.id} 与 ${rect.id} 重叠或间距不足 16px。`
     rectangles.push(rect)
@@ -666,9 +672,9 @@ const createLayoutPlan = async (
 
 计划格式：{"concept":"一句视觉方向","palette":{"background":"#hex","surface":"#hex","primary":"#hex","text":"#hex","muted":"#hex"},"layout":"桌面布局名称","mobile":{"strategy":"single-column","gap":20,"order":["组件 role，按手机阅读顺序"]},"sections":[{"role":"区域作用","bounds":{"left":数字,"top":数字,"width":数字,"height":数字}}],"components":[{"type":"Text|Image|Button|Input|Form|Chart","role":"用途","section":"区域作用","bounds":{"left":数字,"top":数字,"width":数字,"height":数字},"mobileOrder":1,"mobileHeight":数字,"priority":1}]}
 
-桌面规则：规划 4~6 个核心组件并给出最终精确矩形；建立清晰的主标题、说明、视觉主体和转化区层级；区域之间至少 24px 留白；所有常规组件矩形不得重叠且间距至少 16px。任意两个常规组件必须满足“左右至少相隔 16px”或“上下至少相隔 16px”中的一项，不能只凭视觉估计。Form 是较高的完整表单卡片，bounds 必须宽 360~440、高 440~600，且 top + height <= 780，绝不能按普通输入框高度规划。如果页面同时有主视觉 Image 和 Form，优先使用明确的左右双栏：左栏 x=40、宽不超过 640，右栏从 x>=704 开始，Form 宽不超过 440；主视觉不得伸入表单栏。组件 bounds 是最终矩形，不要让多个组件共用同一 section 的完整 bounds。
+桌面规则：规划 4~6 个核心组件并给出最终精确矩形；建立清晰的主标题、说明、视觉主体和转化区层级；区域之间至少 24px 留白；所有常规组件矩形不得重叠且间距至少 16px。任意两个常规组件必须满足“左右至少相隔 16px”或“上下至少相隔 16px”中的一项，不能只凭视觉估计。Form 是完整表单卡片，宽度建议 360~440；高度由字段数量决定，约为 126 + 字段数 × 74px，不能按固定 420px 或单行输入框高度规划，且 top + height <= 780。如果页面同时有主视觉 Image 和 Form，优先使用明确的左右双栏：左栏 x=40、宽不超过 640，右栏从 x>=704 开始，Form 宽不超过 440；主视觉不得伸入表单栏。组件 bounds 是最终矩形，不要让多个组件共用同一 section 的完整 bounds。
 
-手机规则：按用户阅读顺序规划 mobile.order；普通组件统一使用 351px 内容宽度并纵向排列，间距 20px；主标题建议高 80~112，图片 180~260，按钮 48~56，图表 260~320，Form 420~620。手机页面允许纵向滚动，不要把桌面坐标等比缩小或让组件并排。选择克制协调的配色。若使用全画布背景装饰图，role 必须明确包含“背景装饰”，并将其 priority 设为最低。JSON 尽量短。`
+手机规则：按用户阅读顺序规划 mobile.order；普通组件统一使用 351px 内容宽度并纵向排列，间距 20px；主标题建议高 80~112，图片 180~260，按钮 48~56，图表 260~320；Form 高度同样按字段数量计算，约为 126 + 字段数 × 74px。手机页面允许纵向滚动，不要把桌面坐标等比缩小或让组件并排。选择克制协调的配色。若使用全画布背景装饰图，role 必须明确包含“背景装饰”，并将其 priority 设为最低。JSON 尽量短。`
 
   try {
     const response = await fetch(`${env.AI_BASE_URL || 'https://openrouter.ai/api/v1'}/chat/completions`, {
@@ -1343,9 +1349,9 @@ const aiPageGeneratorV2 = (): Plugin => ({
 
 视觉：严格执行布局计划的分区和配色；使用 8px 网格、统一对齐线、24~48px 区域留白和明确的标题/正文/CTA 层级；避免所有组件同尺寸、随机颜色和无意义旋转。标题建议 36~48px、正文 15~18px，按钮高度 44~56px，卡片使用轻边框或柔和背景。Text 的桌面和手机高度必须分别按 content、width、fontSize、lineHeight 的真实换行行数计算并留出内边距，严禁文字被固定高度裁切。文案简洁且贴合需求。需要图片时使用可访问的 https://picsum.photos/seed/<英文关键词>/800/600 地址。
 
-桌面硬约束（优先级高于布局计划）：常规内容在 1200x820 画布的安全区域 left 40~1160、top 40~780 内，彼此不重叠且间距至少 16。布局计划中的组件 bounds 已经过应用侧安全规范化，应直接作为对应组件 style 的 top/left/width/height，不要擅自放大或让组件占满所在 section。Form 是完整表单卡片，不是单行输入框：宽度必须 >= 320、高度必须 >= 420，推荐 360x460；放置后仍须满足 top + height <= 780。如果同时生成主视觉 Image 与 Form，使用互不侵入的左右双栏，并确保 image.left + image.width + 16 <= form.left（或反向关系）。若布局计划中的任何矩形违反这些硬约束，必须主动调整该矩形及相邻组件。Image 可作为受控的最低层装饰与内容重叠：旋转装饰图，或 id/name 明确含 bg、background、deco、背景、装饰的背景图；其 zIndex 必须为 0 或 1。其他 Image 仍是普通内容。components 数组必须按 zIndex 从小到大排列。
+桌面硬约束（优先级高于布局计划）：常规内容在 1200x820 画布的安全区域 left 40~1160、top 40~780 内，彼此不重叠且间距至少 16。布局计划中的组件 bounds 已经过应用侧安全规范化，应直接作为对应组件 style 的 top/left/width/height，不要擅自放大或让组件占满所在 section。Form 是完整表单卡片，不是单行输入框：宽度必须 >= 320；最小高度按字段数量计算，0 个字段约 140px，1 个约 200px，2 个约 276px，3 个约 348px，每增加一个字段约增加 74px；放置后仍须满足 top + height <= 780。如果同时生成主视觉 Image 与 Form，使用互不侵入的左右双栏，并确保 image.left + image.width + 16 <= form.left（或反向关系）。若布局计划中的任何矩形违反这些硬约束，必须主动调整该矩形及相邻组件。Image 可作为受控的最低层装饰与内容重叠：旋转装饰图，或 id/name 明确含 bg、background、deco、背景、装饰的背景图；其 zIndex 必须为 0 或 1。其他 Image 仍是普通内容。components 数组必须按 zIndex 从小到大排列。
 
-手机硬约束：手机不是桌面缩小版。按布局计划的 mobile.order 和“标题→说明/视觉→筛选或表单→结果/CTA”的阅读顺序，把普通组件排成单列；每个普通组件 left:12,width:351,rotate:0，纵向间距至少 20px。主标题 fontSize 26~32，正文 15~18；Image 高 180~300；Button 高 44~64；Chart 高 240~340；Form 高 420~680。页面 responsiveOverrides.mobile.height 必须覆盖最后一个组件底部并额外留 12px，允许大于 812 形成自然滚动页。不要复用桌面 top/left，不要在手机端并排放置大组件。输出前同时检查桌面和手机的边界、间距、Form 尺寸和阅读顺序。
+手机硬约束：手机不是桌面缩小版。按布局计划的 mobile.order 和“标题→说明/视觉→筛选或表单→结果/CTA”的阅读顺序，把普通组件排成单列；每个普通组件 left:12,width:351,rotate:0，纵向间距至少 20px。主标题 fontSize 26~32，正文 15~18；Image 高 180~300；Button 高 44~64；Chart 高 240~340；Form 最小高度同样按字段数计算（0/1/2/3 个字段约为 140/200/276/348px）。页面 responsiveOverrides.mobile.height 必须覆盖最后一个组件底部并额外留 12px，允许大于 812 形成自然滚动页。不要复用桌面 top/left，不要在手机端并排放置大组件。输出前同时检查桌面和手机的边界、间距、Form 尺寸和阅读顺序。
 
 输出骨架：{"id":"page-1","meta":{"title":"页面标题","description":"","createdAt":"ISO 时间","updatedAt":"ISO 时间","version":"2026.05","scene":"landing"},"style":{"width":1200,"height":820,"backgroundColor":"#fff"},"responsiveOverrides":{"mobile":{"width":375,"height":1000,"backgroundColor":"#fff"}},"components":[{"id":"comp-title","type":"Text","style":{"top":40,"left":40,"width":500,"height":96,"zIndex":2,"rotate":0,"opacity":1},"responsiveOverrides":{"mobile":{"top":12,"left":12,"width":351,"height":88,"rotate":0,"fontSize":30}},"props":{"content":"页面标题"},"events":[{"type":"click","config":{"action":"none"}}],"name":"主标题","schemaVersion":"2026.05"}]}`
         let lastError = ''

@@ -18,10 +18,10 @@ import { SCHEMA_VERSION, migratePageData } from './migration'
 import { validateAndRepairPageData } from './pageImport'
 import { MOBILE_AVAILABLE_WIDTH } from '@/utils/mobile'
 import { estimateTextHeight } from '@/utils/textLayout'
+import { getFormMinimumHeight } from '@/utils/formLayout'
 
 const STORAGE_KEY = 'marketing-editor-page'
 const GRID_SIZE = 10
-const MIN_FORM_HEIGHT = 420
 
 const DEVICE_PRESETS: Record<DeviceType, { width: number; height: number; label: string }> = {
   [DT.DESKTOP]: { width: 1200, height: 820, label: 'PC' },
@@ -167,8 +167,11 @@ const normalizeComponentLayout = (component: ComponentData, page: PageData): Com
   next.style.height = Math.min(next.style.height, maxHeight)
 
   if (next.type === ComponentType.FORM) {
-    next.style.height = Math.max(next.style.height, MIN_FORM_HEIGHT)
+    const minimumHeight = getFormMinimumHeight(next.props)
+    next.style.height = Math.max(next.style.height, minimumHeight)
     next.style.width = Math.max(next.style.width, 320)
+    const mobile = next.responsiveOverrides?.mobile
+    if (mobile) mobile.height = Math.max(Number(mobile.height) || next.style.height, minimumHeight)
   }
 
   next.style.left = Math.max(0, Math.min(next.style.left, Math.max(0, page.style.width - next.style.width)))
@@ -317,6 +320,9 @@ export const useEditorStore = defineStore('editor', () => {
     if (isDesktop) {
       const prevStyle: ComponentStyle = clone((previousStyle || component.style) as ComponentStyle)
       const newStyle: ComponentStyle = clone(nextStyle as ComponentStyle)
+      if (component.type === ComponentType.FORM) {
+        newStyle.height = Math.max(newStyle.height, getFormMinimumHeight(component.props))
+      }
       if (JSON.stringify(prevStyle) === JSON.stringify(newStyle)) return
 
       useHistoryStore().executeCommand({
@@ -333,6 +339,13 @@ export const useEditorStore = defineStore('editor', () => {
     } else {
       const device = currentDevice.value
       const prevOverrides = clone(previousStyle || component.responsiveOverrides?.[device] || {})
+      const normalizedNextStyle = clone(nextStyle)
+      if (component.type === ComponentType.FORM) {
+        normalizedNextStyle.height = Math.max(
+          Number(normalizedNextStyle.height) || getMergedStyle(component, device).height,
+          getFormMinimumHeight(component.props)
+        )
+      }
 
       // 差量覆盖：仅保存与桌面端基础样式不同的字段，避免把完整桌面样式固化为移动端覆盖
       const baseStyle = component.style
@@ -345,7 +358,7 @@ export const useEditorStore = defineStore('editor', () => {
         'backgroundColor', 'borderWidth', 'borderColor', 'borderRadius', 'textAlign'
       ]
       for (const key of deltaKeys) {
-        const newVal = nextStyle[key]
+        const newVal = normalizedNextStyle[key]
         const baseVal = baseStyle[key]
         if (newVal !== undefined && newVal !== baseVal) {
           Object.assign(delta, { [key]: newVal })
@@ -427,6 +440,15 @@ export const useEditorStore = defineStore('editor', () => {
       if (mobileHeight > mobile.height) {
         nextOverrides.mobile = { ...(nextOverrides.mobile || {}), height: mobileHeight }
       }
+    }
+    if (component.type === ComponentType.FORM) {
+      const minimumHeight = getFormMinimumHeight(newProps)
+      nextStyle.height = Math.max(nextStyle.height, minimumHeight)
+      const mobileHeight = Math.max(
+        minimumHeight,
+        Number(nextOverrides.mobile?.height) || nextStyle.height
+      )
+      nextOverrides.mobile = { ...(nextOverrides.mobile || {}), height: mobileHeight }
     }
 
     useHistoryStore().executeCommand({
