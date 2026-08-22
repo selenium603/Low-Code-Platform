@@ -76,8 +76,9 @@ npm run build
   - 对不可信 JSON/AI 结果进行运行时校验、默认值补齐、安全修复和导入。
 - `src/stores/aiConversation.ts`
   - 按 `pageId` 独立保存 AI 多轮会话；
-  - 最近保留 8 条消息，更早消息压缩到滚动摘要；
-  - 使用独立 localStorage，不污染页面 JSON。
+  - 最近保留 8 条原始消息，超出窗口的消息淘汰，长期信息由结构化记忆承接；
+  - 长期上下文使用结构化记忆，分别保存用户目标、设计约束、已完成修改和未决问题；
+  - 使用独立 localStorage，不污染页面 JSON，并会在加载时把旧字符串摘要自动迁移为结构化记忆。
 - `src/stores/migration.ts`
   - Schema 迁移链；当前 `SCHEMA_VERSION` 为 `2026.05`。
 
@@ -88,6 +89,17 @@ npm run build
   - 每种组件的默认样式、默认属性和属性面板协议。
 - `src/components/components/`
   - Text、Image、Button、Input、Form、Chart 六类组件的具体实现。
+- `src/utils/chartOption.ts`
+  - 图表 Option 的唯一构建入口；编辑器、预览与 HTML 导出共用同一套柱状图、折线图和饼图配置逻辑。
+- `src/utils/textLayout.ts`
+  - 根据文案、组件宽度、字号、行高及中英文字符宽度估算 Text 最低高度，整页生成、增量 Patch 和手工修改属性共用。
+
+### 图表配置
+
+- Chart 属性协议除标题、类型和数据外，还支持图例显隐/位置、X/Y 轴显隐与名称、数值单位、三档主题配色和 tooltip 展示格式；
+- `buildChartOption` 是无外部闭包依赖的纯函数，`ChartComponent.vue` 直接调用，HTML 导出时序列化同一函数源码，避免维护两套 Option；
+- 旧页面缺少新增字段时，由组件默认 props 和 `pageImport.ts` 的属性修复逻辑补齐，不要求批量重写 localStorage；
+- 图表容器继续通过 `ResizeObserver` 调用 ECharts `resize()`，适配组件缩放和 PC/手机画布切换。
 
 ### AI 生成
 
@@ -187,7 +199,7 @@ ComponentData
 
 ```text
 用户继续提出修改
-→ 发送当前 Page Schema + 最近 6 条消息 + 滚动摘要 + baseRevision
+→ 发送当前 Page Schema + 最近 6 条消息 + 结构化记忆 + baseRevision
 → AI 只返回领域化 Patch 或澄清问题
 → 服务端校验操作白名单与稳定组件 ID
 → 前端在页面副本中执行并复用导入校验
@@ -195,6 +207,8 @@ ComponentData
 → 全部通过后作为一条历史命令提交
 → 可通过一次 undo 完整恢复
 ```
+
+结构化记忆由应用在事务结果明确后更新：成功请求记录用户目标和可识别的设计约束，成功 Patch 记录完成项，澄清响应记录未决问题；下一条有效用户要求会清理上一轮未决问题，撤销 AI 修改会移除最近完成项。取消或失败请求不会写入长期记忆。服务端会再次限制每类条数和文本长度，且当前 Page Schema 始终优先于历史记忆。
 
 ### 预览与导出
 
@@ -211,6 +225,7 @@ ComponentData
 - 支持移动、缩放、旋转、图层调整、参考线和键盘微调；
 - 新增、删除、移动、样式、属性、事件及图层操作均通过命令对象支持 undo/redo；
 - 连续拖动时不能为每个 mousemove 都写历史，否则历史栈会爆炸；当前实现是在结束时提交一次。
+- 左侧图层列表每项带编辑图标，可修改 `component.name`；重命名作为一条命令进入撤销/重做栈，不影响稳定组件 ID。
 
 完整替换页面后，`EditorCanvas` 会监听页面 id 并重新执行画布适配。
 
@@ -277,6 +292,9 @@ MOBILE_AVAILABLE_WIDTH = 351
 - `AI_MODEL`（示例为 `qwen/qwen3.7-plus`）
 - `AI_PLANNING_MODEL`（可选）
 - `AI_BASE_URL`
+- `AI_RAG_ENABLED`（默认启用；仅影响 40+ 组件页面）
+- `AI_EMBEDDING_MODEL`（默认 `openai/text-embedding-3-small`）
+- `AI_EMBEDDING_BASE_URL` / `AI_EMBEDDING_API_KEY`（可选，留空时复用聊天接口地址和 OpenRouter Key）
 
 当前请求重点参数：
 
@@ -328,6 +346,7 @@ normalizeDecorativeImages
 - 手机端按 375px 基准、12px 边距、351px 可用宽度整理为单列；
 - 手机页高根据内容动态增长；
 - 手机端再次检查越界、最小尺寸和重叠。
+- Text 组件会按实际文案、宽度、字号和行高估算双端最低高度；应用侧会覆盖模型低估的高度，防止固定容器配合 `overflow: hidden` 裁切文字。
 
 仍有错误时，会把具体错误追加到下一轮提示词中，最多生成 3 次。前端收到结果后还会通过 `validateAndRepairPageData` 做第二道校验，因此服务端布局校验与前端 Schema 安全校验是分层互补的。
 
@@ -361,15 +380,27 @@ normalizeDecorativeImages
 
 编辑器维护单调递增的 `pageRevision`。AI 请求返回时若 revision 已变化，说明用户在等待期间进行了手工编辑，本次 Patch 会被拒绝，避免覆盖新操作。一次 Patch 在页面副本上完整执行，通过后由 `applyAIPagePatchTransaction` 作为一条命令进入历史栈。
 
-### 40+ 组件的大页面局部上下文
+### 大幅修改的 P0/P1 分阶段事务
 
-小于等于 40 个组件时继续使用原有单次增量修改路径，避免增加普通页面等待时间。超过 40 个组件时，服务端改用两阶段编辑：
+`server/largeEditPlan.ts` 会识别“40+ 组件”“大幅修改”“整体重构”等高操作量要求，先让规划模型返回 2～6 个可独立执行的步骤，再由应用侧规范化步骤范围、操作预算和目标新增数量。单步最多 8 个操作，新增大量组件时先扩展 PC/手机页面高度，避免一次响应过长导致 JSON 截断。
 
-1. `buildAIComponentIndex` 只提取组件稳定 ID、类型、名称、短文案和 PC/手机矩形；
-2. 第一轮模型只从压缩索引中选择最多 12 个目标 ID，歧义或范围过大时返回澄清问题；
-3. `selectLocalPageComponents` 根据目标 ID 补充数组邻居和桌面空间近邻，最多加载 16 个组件的完整 Schema；
-4. 第二轮模型只接收页面外壳、目标组件和局部邻居，并生成领域 Patch；
-5. `validateAIEditResult` 会限制 Patch 只能修改定位阶段选中的稳定 ID，邻居只用于判断布局，不能被顺带修改。
+`AIGenerator.vue` 不会把中间步骤直接写入真实页面，而是克隆当前 `PageData`，依次在副本上执行 Patch。单步若因边界、重叠等应用校验失败，会把精确错误反馈给模型重试一次；任一步仍失败、请求取消或 revision 冲突时丢弃整个副本，真实页面保持不变。全部步骤成功后才通过 `applyAIPagePatchTransaction` 一次提交，因此整轮大改只产生一个 revision 和一条撤销记录。
+
+执行阶段会按 `operationBudget` 动态分配 `max_tokens`，显式识别上游 `finish_reason: length`；JSON 语法错误会转换成“缩短输出并返回完整 JSON”的内部重试提示，不再把 `Expected ',' ... at position ...` 直接暴露给用户。`addComponent` 同时支持 `style` 和 `mobileStyle`，应用侧会分别检查双端边界与安全间距，并在必要时寻找最近空位或增长页面高度。
+
+### 40+ 组件的大页面 RAG 与局部上下文
+
+小于等于 40 个组件时继续使用原有单次增量修改路径，避免增加普通页面等待时间。超过 40 个组件时，服务端使用组件级混合 RAG + 两阶段编辑：
+
+1. `buildAIComponentIndex` 提取稳定 ID、类型、名称、组件文案、PC/手机矩形和区域描述，并计算每个组件最近的 4 个空间邻居；
+2. `server/componentRag.ts` 将这些信息构造成组件检索文档，通过 Embedding API 获取向量；查询向量由本轮要求、结构化记忆和最近对话组成；
+3. 使用余弦相似度为主、精确关键词匹配为辅做混合重排，再用空间邻居扩展到最多 16 个候选；
+4. 第一轮定位模型只从 RAG 候选中选择最多 12 个目标 ID，歧义或范围过大时返回澄清问题；
+5. `selectLocalPageComponents` 根据目标 ID 补充数组邻居和桌面空间近邻，最多加载 16 个组件的完整 Schema；
+6. 第二轮模型只接收页面外壳、目标组件和局部邻居，并生成领域 Patch；
+7. `validateAIEditResult` 会限制 Patch 只能修改定位阶段选中的稳定 ID，RAG 相关度不能绕过 Patch 白名单和稳定 ID 校验。
+
+组件文档向量在 Vite/BFF 进程内按“模型 + 文档内容”缓存 15 分钟，最多 1024 条；页面只修改少量组件时仅重新计算变化文档，查询向量每轮重新计算。Embedding 失败、未配置或显式关闭时，会自动降级为本地关键词重排 + 空间邻居扩展，随后仍经过同一个定位模型，避免大页面编辑完全不可用。
 
 前端到本地 Vite 中间件的 HTTP 请求仍携带完整页面，以便服务端做 ID、revision 和最终 Patch 校验；被压缩的是发给模型的上下文。迁移到生产 BFF 后可进一步把页面 Schema 存在服务端，前端只传 `pageId + revision + message`。
 
@@ -405,7 +436,13 @@ AI 取消链路已做浏览器回归：空闲关闭不弹确认；请求中关�
 
 AI 新页面布局修复后完成真实链路回归：使用“主标题 + 产品主视觉图 + 卖点说明 + 联系表单 + CTA”的蓝紫科技落地页需求，第一轮即成功生成并载入 6 个组件；桌面主视觉与表单双栏无重叠，手机端按 375px 单列排列，浏览器控制台无错误。
 
-大页面局部上下文已使用 81 个合成组件完成真实模型回归：定位阶段只命中 `comp-73`，局部阶段加载 16 个组件，Patch 阶段第一次即返回只修改 `comp-73` 的 `updateProps` 操作。
+大页面 RAG 已使用 81 个合成组件完成真实 Embedding + 模型回归：按名称/文案召回时只定位 `comp-73` 并返回单个 `updateProps`；关系请求同时定位 `comp-73` 与参照组件 `comp-72`，返回 desktop/mobile 两个 `placeRelative`；去掉目标名称、仅描述“页面右下角按钮”时也能依靠类型与空间区域命中 `comp-73`。三次均在第一轮 Patch 成功，局部上下文保持最多 16 个组件。
+
+大幅修改 P0/P1 已完成真实链路回归：从 7 个组件提出“最终达到 40+ 组件”的要求，规划为 6 步并执行 35 个新增操作，最终组件数为 40；真实页面 revision 只增加 1，点击一次全局撤销即恢复为 7 个组件。中间步骤不写入页面，失败时不会留下半成品。
+
+图表配置已做浏览器回归：属性面板可修改图例位置、坐标轴名称、数值单位、主题色和 tooltip 格式；编辑器与预览均成功渲染 ECharts，控制台无错误。HTML 导出改为复用 `src/utils/chartOption.ts` 的构建函数，不再单独维护一份 Option 分支。
+
+AI 结构化记忆改造已通过 `npm run type-check` 和 `npm run build`；旧 `summary` 字符串会在会话 Store 首次加载时迁移，接口仍保留旧字段的服务端降级兼容。
 
 构建存在非阻塞警告：主 JS 包约 2.35 MB，超过 500 kB 建议阈值，主要可能来自 ECharts 和 Element Plus。后续可通过按需加载、动态 import 或 `manualChunks` 优化。
 

@@ -58,6 +58,17 @@
           <span class="layer-index">{{ layer.style.zIndex }}</span>
           <span class="layer-name">{{ layer.name }}</span>
           <span class="layer-type">{{ layer.type }}</span>
+          <el-button
+            class="layer-rename"
+            text
+            circle
+            size="small"
+            title="修改图层名称"
+            :aria-label="`修改图层名称：${layer.name}`"
+            @click.stop="renameLayer(layer.id, layer.name)"
+          >
+            <el-icon><Edit /></el-icon>
+          </el-button>
         </div>
       </div>
       <div v-else class="empty-layer">当前暂无图层</div>
@@ -67,6 +78,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { componentProtocols } from './components/registry'
 import { useEditorStore } from '@/stores/editor'
 import { ComponentType } from '@/types'
@@ -74,6 +86,7 @@ import {
   CircleCheck,
   Document,
   EditPen,
+  Edit,
   Picture,
   Tickets,
   DataAnalysis
@@ -112,6 +125,28 @@ const handleDragStart = (componentType: ComponentType, event: DragEvent) => {
 const selectLayer = (componentId: string) => {
   const component = currentPage.value?.components.find((item) => item.id === componentId) || null
   editorStore.selectComponent(component)
+}
+
+const renameLayer = async (componentId: string, currentName: string) => {
+  selectLayer(componentId)
+  try {
+    const { value } = await ElMessageBox.prompt('请输入新的图层名称', '修改图层名称', {
+      inputValue: currentName,
+      inputPlaceholder: '1～80 个字符',
+      inputValidator: (input) => {
+        const name = input.trim()
+        if (!name) return '图层名称不能为空'
+        if (name.length > 80) return '图层名称不能超过 80 个字符'
+        return true
+      },
+      confirmButtonText: '保存',
+      cancelButtonText: '取消'
+    })
+    editorStore.renameComponent(componentId, value)
+    ElMessage.success('图层名称已修改')
+  } catch {
+    // 用户取消时保持原名称。
+  }
 }
 </script>
 
@@ -231,7 +266,7 @@ const selectLayer = (componentId: string) => {
 
 .layer-item {
   display: grid;
-  grid-template-columns: 28px 1fr auto;
+  grid-template-columns: 28px minmax(0, 1fr) auto 28px;
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
@@ -261,6 +296,18 @@ const selectLayer = (componentId: string) => {
   font-size: 13px;
   color: #111827;
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layer-rename {
+  color: #64748b;
+}
+
+.layer-rename:hover {
+  color: #2563eb;
+  background: #dbeafe;
 }
 
 .layer-type,

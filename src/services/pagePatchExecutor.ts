@@ -5,6 +5,7 @@ import { getComponentProtocol } from '@/components/components/registry'
 import { validateAndRepairPageData } from '@/stores/pageImport'
 import { SCHEMA_VERSION } from '@/stores/migration'
 import { MOBILE_AVAILABLE_WIDTH, MOBILE_PADDING, MOBILE_WIDTH_THRESHOLD } from '@/utils/mobile'
+import { estimateTextHeight } from '@/utils/textLayout'
 
 type UnknownRecord = Record<string, unknown>
 
@@ -55,6 +56,14 @@ const effectiveStyle = (component: ComponentData, device: DeviceType): Component
     : component.style
 )
 
+const isDecorativeComponent = (component: ComponentData, style: ComponentStyle) => (
+  component.type === ComponentType.IMAGE && (
+    style.rotate !== 0
+    || style.opacity <= 0.45
+    || /(^|[-_\s])(bg|background|deco|decorative)([-_\s]|$)|背景|装饰/i.test(`${component.id} ${component.name}`)
+  )
+)
+
 const applyStyle = (component: ComponentData, device: DeviceType, changes: Partial<ComponentStyle>) => {
   if (device === DeviceType.DESKTOP) {
     component.style = { ...component.style, ...changes }
@@ -86,6 +95,65 @@ const clampComponent = (component: ComponentData, page: PageData, device: Device
     height: Math.max(40, current.height),
     rotate: 0
   })
+}
+
+const placeAddedComponentSafely = (component: ComponentData, page: PageData, device: DeviceType) => {
+  clampComponent(component, page, device)
+  const current = effectiveStyle(component, device)
+  if (isDecorativeComponent(component, current)) return
+  const pageStyle = device === DeviceType.DESKTOP
+    ? page.style
+    : { ...page.style, ...(page.responsiveOverrides?.mobile || {}) }
+  const padding = device === DeviceType.MOBILE ? MOBILE_PADDING : 24
+  const gap = 16
+  const step = device === DeviceType.MOBILE ? 12 : 16
+  const maxLeft = Math.max(padding, pageStyle.width - padding - current.width)
+  const maxTop = Math.max(padding, pageStyle.height - padding - current.height)
+  const others = page.components.filter((other) => {
+    if (other.id === component.id) return false
+    const style = effectiveStyle(other, device)
+    return !isDecorativeComponent(other, style)
+  })
+  const freeAt = (left: number, top: number) => others.every((other) => {
+    const style = effectiveStyle(other, device)
+    return left + current.width + gap <= style.left
+      || style.left + style.width + gap <= left
+      || top + current.height + gap <= style.top
+      || style.top + style.height + gap <= top
+  })
+
+  const preferredLeft = Math.max(padding, Math.min(maxLeft, current.left))
+  const preferredTop = Math.max(padding, Math.min(maxTop, current.top))
+  const candidateLefts = device === DeviceType.MOBILE
+    ? [MOBILE_PADDING]
+    : [preferredLeft, ...Array.from(
+        { length: Math.floor((maxLeft - padding) / step) + 1 },
+        (_, index) => padding + index * step
+      )]
+  for (let top = preferredTop; top <= maxTop; top += step) {
+    for (const left of candidateLefts) {
+      if (!freeAt(left, top)) continue
+      applyStyle(component, device, { left, top })
+      return
+    }
+  }
+
+  const bottom = others.reduce((value, other) => {
+    const style = effectiveStyle(other, device)
+    return Math.max(value, style.top + style.height)
+  }, padding)
+  const nextTop = bottom + gap
+  applyStyle(component, device, { left: device === DeviceType.MOBILE ? MOBILE_PADDING : padding, top: nextTop })
+  if (device === DeviceType.DESKTOP) {
+    page.style.height = Math.max(page.style.height, nextTop + current.height + padding)
+  } else {
+    if (!page.responsiveOverrides) page.responsiveOverrides = {}
+    page.responsiveOverrides.mobile = {
+      ...(page.responsiveOverrides.mobile || {}),
+      width: MOBILE_WIDTH_THRESHOLD,
+      height: Math.max(Number(page.responsiveOverrides.mobile?.height) || 812, nextTop + current.height + padding)
+    }
+  }
 }
 
 const placeRelative = (page: PageData, operation: Extract<AIPageOperation, { op: 'placeRelative' }>) => {
@@ -126,6 +194,15 @@ const addComponent = (page: PageData, operation: Extract<AIPageOperation, { op: 
   const protocol = getComponentProtocol(operation.componentType)
   if (!protocol) throw new Error(`组件类型“${operation.componentType}”未注册。`)
   const styleChanges = operation.style ? sanitizeStyleChanges(operation.style) : {}
+  const requestedMobileStyle = operation.mobileStyle
+    ? sanitizeStyleChanges(operation.mobileStyle)
+    : {
+        left: MOBILE_PADDING,
+        top: finite(styleChanges.top) ? styleChanges.top : page.components.length * 140 + MOBILE_PADDING,
+        width: Math.min(MOBILE_AVAILABLE_WIDTH, finite(styleChanges.width) ? styleChanges.width : MOBILE_AVAILABLE_WIDTH),
+        height: finite(styleChanges.height) ? styleChanges.height : protocol.defaultStyle.height,
+        rotate: 0
+      }
   const component: ComponentData = {
     id: `comp_ai_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
     type: operation.componentType,
@@ -141,11 +218,27 @@ const addComponent = (page: PageData, operation: Extract<AIPageOperation, { op: 
       ...(isRecord(operation.props) ? clone(operation.props) : {})
     } as ComponentData['props'],
     events: [{ type: 'click', config: { action: 'none' } }],
-    ...(operation.device === DeviceType.MOBILE
-      ? { responsiveOverrides: { mobile: styleChanges } }
-      : {})
+    responsiveOverrides: {
+      mobile: operation.mobileStyle
+        ? requestedMobileStyle
+        : operation.device === DeviceType.MOBILE
+          ? styleChanges
+          : requestedMobileStyle
+    }
   }
-  clampComponent(component, page, operation.device || DeviceType.DESKTOP)
+  if (component.type === ComponentType.TEXT) {
+    const content = (component.props as { content?: unknown }).content
+    component.style.height = Math.max(
+      component.style.height,
+      estimateTextHeight(content, component.style.width, component.style.fontSize, component.style.lineHeight)
+    )
+    const mobile = effectiveStyle(component, DeviceType.MOBILE)
+    applyStyle(component, DeviceType.MOBILE, {
+      height: Math.max(mobile.height, estimateTextHeight(content, mobile.width, mobile.fontSize, mobile.lineHeight))
+    })
+  }
+  placeAddedComponentSafely(component, page, DeviceType.DESKTOP)
+  placeAddedComponentSafely(component, page, DeviceType.MOBILE)
   page.components.push(component)
   return component.id
 }
@@ -159,6 +252,19 @@ const updateProps = (page: PageData, operation: Extract<AIPageOperation, { op: '
     if (!allowed.has(key)) throw new Error(`组件“${component.name}”不支持属性“${key}”。`)
   }
   component.props = { ...clone(component.props), ...clone(operation.changes) } as ComponentData['props']
+  if (component.type === ComponentType.TEXT && 'content' in operation.changes) {
+    const content = (component.props as { content?: unknown }).content
+    component.style.height = Math.max(
+      component.style.height,
+      estimateTextHeight(content, component.style.width, component.style.fontSize, component.style.lineHeight)
+    )
+    const mobile = effectiveStyle(component, DeviceType.MOBILE)
+    applyStyle(component, DeviceType.MOBILE, {
+      height: Math.max(mobile.height, estimateTextHeight(content, mobile.width, mobile.fontSize, mobile.lineHeight))
+    })
+    placeAddedComponentSafely(component, page, DeviceType.DESKTOP)
+    placeAddedComponentSafely(component, page, DeviceType.MOBILE)
+  }
 }
 
 const moveLayer = (page: PageData, operation: Extract<AIPageOperation, { op: 'moveLayer' }>) => {
@@ -207,6 +313,7 @@ export const validateAIPagePatch = (value: unknown): AIPagePatch => {
       if (operation.device !== undefined && !Object.values(DeviceType).includes(operation.device as DeviceType)) throw new Error('addComponent 的 device 无效。')
       if (operation.props !== undefined && !isRecord(operation.props)) throw new Error('addComponent 的 props 必须是对象。')
       if (operation.style !== undefined && !isRecord(operation.style)) throw new Error('addComponent 的 style 必须是对象。')
+      if (operation.mobileStyle !== undefined && !isRecord(operation.mobileStyle)) throw new Error('addComponent 的 mobileStyle 必须是对象。')
     }
     if (op === 'moveLayer' && !['up', 'down', 'top', 'bottom'].includes(String(operation.direction))) throw new Error('moveLayer 的 direction 无效。')
   }
@@ -255,7 +362,8 @@ export const applyAIPagePatch = (source: PageData, rawPatch: unknown) => {
         break
       case 'addComponent': {
         const id = addComponent(page, operation)
-        geometryChanges.push({ id, device: operation.device || DeviceType.DESKTOP })
+        geometryChanges.push({ id, device: DeviceType.DESKTOP })
+        geometryChanges.push({ id, device: DeviceType.MOBILE })
         break
       }
       case 'removeComponent':
@@ -272,21 +380,14 @@ export const applyAIPagePatch = (source: PageData, rawPatch: unknown) => {
 
   resizedPages.forEach((device) => page.components.forEach((component) => clampComponent(component, page, device)))
 
-  const isDecoration = (component: ComponentData, style: ComponentStyle) => (
-    component.type === ComponentType.IMAGE && (
-      style.rotate !== 0
-      || style.opacity <= 0.45
-      || /(^|[-_\s])(bg|background|deco|decorative)([-_\s]|$)|背景|装饰/i.test(`${component.id} ${component.name}`)
-    )
-  )
   for (const changed of geometryChanges) {
     const component = getComponent(page, changed.id)
     const style = effectiveStyle(component, changed.device)
-    if (isDecoration(component, style)) continue
+    if (isDecorativeComponent(component, style)) continue
     for (const other of page.components) {
       if (other.id === component.id) continue
       const otherStyle = effectiveStyle(other, changed.device)
-      if (isDecoration(other, otherStyle)) continue
+      if (isDecorativeComponent(other, otherStyle)) continue
       const overlaps = style.left < otherStyle.left + otherStyle.width
         && style.left + style.width > otherStyle.left
         && style.top < otherStyle.top + otherStyle.height

@@ -72,6 +72,8 @@ export interface FormProps {
 }
 
 export type ChartTypeOption = 'bar' | 'line' | 'pie'
+export type ChartLegendPosition = 'top' | 'bottom' | 'right'
+export type ChartTooltipFormat = 'name-value' | 'value' | 'percent'
 
 export interface ChartDataItem {
   name: string
@@ -82,6 +84,17 @@ export interface ChartProps {
   chartType: ChartTypeOption
   title: string
   data: ChartDataItem[]
+  showLegend: boolean
+  legendPosition: ChartLegendPosition
+  showXAxis: boolean
+  showYAxis: boolean
+  xAxisName: string
+  yAxisName: string
+  valueUnit: string
+  primaryColor: string
+  secondaryColor: string
+  accentColor: string
+  tooltipFormat: ChartTooltipFormat
 }
 
 export type ComponentPropsMap = {
@@ -164,8 +177,9 @@ export interface HistoryState {
 export interface ComponentSchemaField {
   key: string
   label: string
-  type: 'string' | 'number' | 'color' | 'select' | 'array'
+  type: 'string' | 'number' | 'color' | 'select' | 'array' | 'boolean'
   options?: string[]
+  optionLabels?: Record<string, string>
   control?: 'input' | 'textarea'
   placeholder?: string
   min?: number

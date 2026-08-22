@@ -75,6 +75,12 @@ const repairProps = (protocol: ComponentProtocol, value: unknown, warnings: stri
       continue
     }
 
+    if (field.type === 'boolean') {
+      if (typeof candidate === 'boolean') props[field.key] = candidate
+      else warnings.push(`组件“${protocol.label}”的“${field.label}”必须是布尔值，已使用默认值。`)
+      continue
+    }
+
     if (field.type === 'select') {
       if (typeof candidate === 'string' && field.options?.includes(candidate)) props[field.key] = candidate
       else warnings.push(`组件“${protocol.label}”的“${field.label}”选项无效，已使用默认值。`)

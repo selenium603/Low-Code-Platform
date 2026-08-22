@@ -103,8 +103,9 @@ import PropertyPanel from './PropertyPanel.vue'
 import PageRenderer from './PageRenderer.vue'
 import AIGenerator from './AIGenerator.vue'
 import { Document, Download, MagicStick, Plus, RefreshLeft, RefreshRight, Upload, View } from '@element-plus/icons-vue'
-import type { DeviceType } from '@/types'
+import type { ChartProps, DeviceType } from '@/types'
 import { MOBILE_AVAILABLE_WIDTH, MOBILE_PADDING, MOBILE_SMALL_BREAKPOINT, MOBILE_WIDTH_THRESHOLD } from '@/utils/mobile'
+import { getChartOptionFactorySource } from '@/utils/chartOption'
 
 const switchDevice = (device: DeviceType) => {
   editorStore.setDevice(device)
@@ -179,10 +180,7 @@ const generateHTMLPage = (page: Record<string, unknown>): string => {
         return `<form ${idAttr} style="${pos};background:${style.backgroundColor || '#ffffff'};border:${style.borderWidth ? `${style.borderWidth}px solid ${style.borderColor || '#dcdfe6'}` : '1px solid #ebeef5'};border-radius:${style.borderRadius ? `${style.borderRadius}px` : '12px'};padding:20px;box-sizing:border-box;overflow:auto;box-shadow:0 10px 30px rgba(15,23,42,0.06);display:flex;flex-direction:column;gap:16px;${cursorStyle}" onsubmit="event.preventDefault();alert('${escJs(props.submitText as string || '提交成功')}')"><div style="font-size:18px;font-weight:700;color:#1f2937;line-height:1.4">${escAttr(props.title as string) || '活动报名表单'}</div><div style="display:flex;flex:1;flex-direction:column;gap:12px;min-height:0">${fieldsHtml}</div><button type="submit" style="height:40px;min-height:40px;border:none;border-radius:999px;background:#2563eb;color:#fff;font-weight:600;font-size:14px;cursor:pointer;transition:opacity 0.2s" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity=''">${escAttr(props.submitText as string) || '立即提交'}</button></form>`
       }
       case 'Chart': {
-        const chartData = (props.data as Array<{ name: string; value: number }>) || []
-        const chartType = (props.chartType as string) || 'bar'
-        const chartTitle = (props.title as string) || ''
-        const chartConfig = JSON.stringify({ type: chartType, title: chartTitle, data: chartData }).replace(/'/g, '&#39;')
+        const chartConfig = JSON.stringify(props as unknown as ChartProps).replace(/'/g, '&#39;')
         return `<div ${idAttr} style="${pos};background:${style.backgroundColor || 'transparent'};border:${style.borderWidth ? `${style.borderWidth}px solid ${style.borderColor || '#ccc'}` : 'none'};border-radius:${style.borderRadius ? `${style.borderRadius}px` : '0'};overflow:hidden" data-chart='${chartConfig}'></div>`
       }
       default:
@@ -308,6 +306,7 @@ const generateHTMLPage = (page: Record<string, unknown>): string => {
   }).join('\n    ')
 
   const mobileMediaQuery = `\n  @media (max-width: 768px) {\n    body{padding:16px 0;}\n    .page-container{width:min(100%, ${MOBILE_WIDTH}px) !important;max-width:${MOBILE_WIDTH}px;height:${MOBILE_HEIGHT}px !important;min-height:${MOBILE_HEIGHT}px;background:${MOBILE_BACKGROUND} !important;position:relative;display:block;padding:0;box-sizing:border-box;}\n    .page-container > *{position:absolute !important;}\n    ${mobileCss}\n  }\n  @media (max-width: ${MOBILE_SMALL_BREAKPOINT}px) {\n    body{padding:0;}\n    .page-container{width:100% !important;max-width:none;border-radius:0;box-shadow:none;}\n    .page-container > *{max-width:calc(100% - ${MOBILE_PADDING * 2}px) !important;}\n    ${smallScreenTypographyCss}\n  }`
+  const chartOptionFactorySource = getChartOptionFactorySource()
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -331,25 +330,19 @@ const generateHTMLPage = (page: Record<string, unknown>): string => {
       ${componentsHtml}
   </div>
   <script>
+    var buildChartOption = ${chartOptionFactorySource}
     document.querySelectorAll('[data-chart]').forEach(function(el) {
       try {
         var config = JSON.parse(el.getAttribute('data-chart').replace(/&#39;/g, "'"))
         if (config.data && config.data.length) {
           var chart = echarts.init(el)
-          var option = { title: { text: config.title, left: 'center', textStyle: { fontSize: 14, fontWeight: 600 } }, tooltip: {}, grid: { left: 40, right: 20, top: 40, bottom: 30 } }
-          if (config.type === 'pie') {
-            option.series = [{ type: 'pie', radius: ['30%', '60%'], center: ['50%', '55%'], data: config.data, label: { show: true, formatter: '{b}: {c}' } }]
-          } else if (config.type === 'line') {
-            option.xAxis = { type: 'category', data: config.data.map(function(d) { return d.name }), axisLabel: { fontSize: 11 } }
-            option.yAxis = { type: 'value' }
-            option.series = [{ type: 'line', data: config.data.map(function(d) { return d.value }), smooth: true, lineStyle: { width: 3 }, symbolSize: 6, itemStyle: { color: '#ee6666' } }]
+          chart.setOption(buildChartOption(config), true)
+          if (typeof ResizeObserver !== 'undefined') {
+            var observer = new ResizeObserver(function() { chart.resize() })
+            observer.observe(el)
           } else {
-            option.xAxis = { type: 'category', data: config.data.map(function(d) { return d.name }), axisLabel: { fontSize: 11 } }
-            option.yAxis = { type: 'value' }
-            option.series = [{ type: 'bar', data: config.data.map(function(d) { return d.value }), itemStyle: { color: '#5470c6', borderRadius: [4,4,0,0] } }]
+            window.addEventListener('resize', function() { chart.resize() })
           }
-          chart.setOption(option)
-          window.addEventListener('resize', function() { chart.resize() })
         }
       } catch(e) { console.error('Chart render error', e) }
     })

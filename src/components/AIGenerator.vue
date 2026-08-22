@@ -172,6 +172,8 @@ const generate = async (message: string, signal: AbortSignal) => {
       `已生成并载入 ${componentCount} 个可编辑组件。你可以继续告诉我需要修改什么。`,
       warnings.length ? `自动修复 ${warnings.length} 项数据；生成尝试 ${result.attempts} 次。` : `生成尝试 ${result.attempts} 次。`
     )
+    conversationStore.rememberUserIntent(page.id, editorStore.pageRevision, message)
+    conversationStore.rememberCompletedChange(page.id, editorStore.pageRevision, `生成并载入 ${componentCount} 个可编辑组件`)
   }
   mode.value = 'edit'
   ElMessage.success(`页面生成完成，已载入 ${componentCount} 个组件。`)
@@ -183,7 +185,7 @@ const edit = async (message: string, signal: AbortSignal) => {
   const baseRevision = editorStore.pageRevision
   const session = conversationStore.getSession(page.id, baseRevision)
   const requestMessages = JSON.parse(JSON.stringify(session.recentMessages))
-  const requestSummary = session.summary
+  const requestMemory = JSON.parse(JSON.stringify(session.memory))
   const pendingMessage = conversationStore.appendMessage(page.id, baseRevision, 'user', message)
   progressText.value = '正在读取当前页面和最近对话…'
 
@@ -194,7 +196,7 @@ const edit = async (message: string, signal: AbortSignal) => {
       page: JSON.parse(JSON.stringify(page)),
       baseRevision,
       recentMessages: requestMessages,
-      conversationSummary: requestSummary
+      conversationMemory: requestMemory
     }, (progress) => { progressText.value = progress }, signal)
   } catch (error) {
     if (isAbortError(error)) conversationStore.removeMessage(page.id, pendingMessage.id)
@@ -213,24 +215,114 @@ const edit = async (message: string, signal: AbortSignal) => {
 
   if (response.result.type === 'need_clarification') {
     conversationStore.appendMessage(page.id, baseRevision, 'assistant', response.result.question)
+    conversationStore.rememberUserIntent(page.id, baseRevision, message)
+    conversationStore.rememberOpenQuestion(page.id, baseRevision, response.result.question)
     return
   }
 
-  progressText.value = '正在校验并事务式应用增量修改…'
-  const applied = applyAIPagePatch(page, response.result)
-  editorStore.applyAIPagePatchTransaction(applied.page, applied.patch.summary, baseRevision)
+  let nextPage = JSON.parse(JSON.stringify(page)) as typeof page
+  let summary = ''
+  let operationCount = 0
+  let stepCount = 1
+  const allWarnings: string[] = []
+
+  if (response.result.type === 'page_edit_plan') {
+    const plan = response.result
+    stepCount = plan.steps.length
+    for (let index = 0; index < plan.steps.length; index += 1) {
+      const step = plan.steps[index]
+      if (!step) continue
+      let validationError = ''
+      let stepApplied = false
+      for (let applicationAttempt = 1; applicationAttempt <= 2; applicationAttempt += 1) {
+        throwIfAborted(signal)
+        if (editorStore.pageRevision !== baseRevision) {
+          throw new Error('AI 处理期间页面已发生修改。为避免覆盖手工操作，请重新发送这条要求。')
+        }
+        progressText.value = `正在执行大幅修改 ${index + 1}/${plan.steps.length}：${step.title}${applicationAttempt > 1 ? '（修正布局）' : ''}`
+        let stepResponse: Awaited<ReturnType<typeof editPageFromPrompt>>
+        try {
+          stepResponse = await editPageFromPrompt({
+            message: step.instruction,
+            page: JSON.parse(JSON.stringify(nextPage)),
+            baseRevision,
+            recentMessages: requestMessages,
+            conversationMemory: requestMemory,
+            execution: {
+              planId: plan.planId,
+              planSummary: plan.summary,
+              originalRequest: message,
+              stepIndex: index,
+              stepCount: plan.steps.length,
+              step,
+              ...(validationError ? { validationError } : {})
+            }
+          }, (progress) => {
+            progressText.value = `步骤 ${index + 1}/${plan.steps.length}：${progress}`
+          }, signal)
+        } catch (error) {
+          if (isAbortError(error)) conversationStore.removeMessage(page.id, pendingMessage.id)
+          throw error
+        }
+        await waitForCloseDecision()
+        if (signal.aborted) {
+          conversationStore.removeMessage(page.id, pendingMessage.id)
+          throwIfAborted(signal)
+        }
+        if (stepResponse.result.type === 'need_clarification') {
+          conversationStore.appendMessage(page.id, baseRevision, 'assistant', stepResponse.result.question)
+          conversationStore.rememberUserIntent(page.id, baseRevision, message)
+          conversationStore.rememberOpenQuestion(page.id, baseRevision, stepResponse.result.question)
+          return
+        }
+        if (stepResponse.result.type === 'page_edit_plan') {
+          throw new Error(`大幅修改第 ${index + 1} 步返回了重复计划，已取消整次修改。`)
+        }
+        try {
+          const appliedStep = applyAIPagePatch(nextPage, stepResponse.result)
+          nextPage = appliedStep.page
+          operationCount += appliedStep.patch.operations.length
+          allWarnings.push(...appliedStep.warnings)
+          stepApplied = true
+          break
+        } catch (error) {
+          validationError = error instanceof Error ? error.message : '页面副本校验失败'
+          if (applicationAttempt === 2) {
+            throw new Error(`大幅修改第 ${index + 1}/${plan.steps.length} 步“${step.title}”连续两次校验失败：${validationError}。真实页面未发生变化。`)
+          }
+        }
+      }
+      if (!stepApplied) throw new Error(`大幅修改第 ${index + 1} 步未能安全应用，真实页面未发生变化。`)
+    }
+    summary = plan.summary
+  } else {
+    progressText.value = '正在校验并事务式应用增量修改…'
+    const applied = applyAIPagePatch(nextPage, response.result)
+    nextPage = applied.page
+    summary = applied.patch.summary
+    operationCount = applied.patch.operations.length
+    allWarnings.push(...applied.warnings)
+  }
+
+  if (editorStore.pageRevision !== baseRevision) {
+    throw new Error('AI 处理期间页面已发生修改。为避免覆盖手工操作，请重新发送这条要求。')
+  }
+  progressText.value = stepCount > 1 ? '所有步骤已通过校验，正在一次性提交页面…' : '正在提交修改…'
+  editorStore.applyAIPagePatchTransaction(nextPage, summary, baseRevision)
   editorStore.persistPage()
   const nextRevision = editorStore.pageRevision
   conversationStore.appendMessage(
     page.id,
     nextRevision,
     'assistant',
-    `已完成：${applied.patch.summary}`,
-    applied.warnings.length
-      ? `执行 ${applied.patch.operations.length} 个操作，并安全修复 ${applied.warnings.length} 项数据。`
-      : `执行 ${applied.patch.operations.length} 个增量操作，可通过顶部撤销恢复。`
+    `已完成：${summary}`,
+    allWarnings.length
+      ? `分 ${stepCount} 步执行 ${operationCount} 个操作，并安全修复 ${allWarnings.length} 项数据；已作为一条命令提交。`
+      : `分 ${stepCount} 步执行 ${operationCount} 个增量操作，已作为一条命令提交，可通过顶部撤销恢复。`
   )
-  ElMessage.success(`AI 增量修改完成：${applied.patch.summary}`)
+  conversationStore.rememberUserIntent(page.id, nextRevision, message)
+  conversationStore.rememberCompletedChange(page.id, nextRevision, summary)
+  ElMessage.success(`AI 增量修改完成：${summary}`)
 }
 
 const submit = async () => {
@@ -317,6 +409,7 @@ const undoLastAIChange = () => {
   historyStore.undo()
   const page = currentPage.value
   if (page) {
+    conversationStore.forgetLastCompletedChange(page.id, editorStore.pageRevision)
     conversationStore.appendMessage(page.id, editorStore.pageRevision, 'assistant', '已撤销上一轮 AI 修改，后续修改将以当前页面为准。')
     conversationStore.syncRevision(page.id, editorStore.pageRevision)
     editorStore.persistPage()

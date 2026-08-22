@@ -70,8 +70,10 @@
               </div>
             </div>
           </div>
-          <div v-if="showGuidelines && guides.x !== null" class="guide guide-x" :style="{ left: `${guides.x}px` }"></div>
-          <div v-if="showGuidelines && guides.y !== null" class="guide guide-y" :style="{ top: `${guides.y}px` }"></div>
+          <template v-if="showGuidelines">
+            <div v-for="gx in guides.x" :key="`x${gx}`" class="guide guide-x" :style="{ left: `${gx}px` }"></div>
+            <div v-for="gy in guides.y" :key="`y${gy}`" class="guide guide-y" :style="{ top: `${gy}px` }"></div>
+          </template>
         </div>
         </div>
       </div>
@@ -90,7 +92,7 @@ import { getMobileComponentStyle, getMobilePageStyle, MOBILE_AVAILABLE_WIDTH } f
 const editorStore = useEditorStore()
 const viewportRef = ref<HTMLElement | null>(null)
 const backgroundRef = ref<HTMLElement | null>(null)
-const guides = ref<{ x: number | null; y: number | null }>({ x: null, y: null })
+const guides = ref<{ x: number[]; y: number[] }>({ x: [], y: [] })
 const canvasContentHeight = ref(0)
 
 const currentPage = computed(() => editorStore.currentPage)
@@ -168,13 +170,45 @@ const wrapperStyle = (component: ComponentData) => {
   }
 }
 const align = (value: number) => snapToGrid.value ? Math.round(value / editorStore.GRID_SIZE) * editorStore.GRID_SIZE : value
-const clearGuides = () => { guides.value = { x: null, y: null } }
-const updateGuides = (left: number, top: number, width: number, height: number) => {
-  const near = (targets: number[], val: number) => targets.find((n) => Math.abs(n - val) <= 4) ?? null
-  guides.value = {
-    x: near([0, pageWidth.value / 2, pageWidth.value], left) ?? near([0, pageWidth.value / 2, pageWidth.value], left + width / 2),
-    y: near([0, pageHeight.value / 2, pageHeight.value], top) ?? near([0, pageHeight.value / 2, pageHeight.value], top + height / 2)
+const clearGuides = () => { guides.value = { x: [], y: [] } }
+// 只收集当前操作组件之外的有效矩形；画布边界不属于“组件对齐”。
+const getOtherRects = (activeComponentId: string) => {
+  const rects: Array<{ left: number; top: number; width: number; height: number }> = []
+  if (isMobile.value) return rects
+  for (const comp of currentPage.value?.components || []) {
+    if (comp.id === activeComponentId) continue
+    const eff = getEffectiveStyle(comp)
+    rects.push({ left: eff.left, top: eff.top, width: eff.width, height: eff.height })
   }
+  return rects
+}
+// 只有当前组件的边缘/中线接近其他组件的边缘/中线时才显示参考线。
+const updateGuides = (left: number, top: number, width: number, height: number, activeComponentId: string) => {
+  const near = (targets: number[], val: number) => targets.find((n) => Math.abs(n - val) <= 4) ?? null
+
+  const refX: number[] = []
+  const refY: number[] = []
+  for (const rect of getOtherRects(activeComponentId)) {
+    refX.push(rect.left, rect.left + rect.width / 2, rect.left + rect.width)
+    refY.push(rect.top, rect.top + rect.height / 2, rect.top + rect.height)
+  }
+
+  const ownX = [left, left + width / 2, left + width]
+  const ownY = [top, top + height / 2, top + height]
+
+  // 仅收集命中的参考线，去重后作为引导线渲染
+  const matchedX: number[] = []
+  for (const v of ownX) {
+    const hit = near(refX, v)
+    if (hit !== null && !matchedX.includes(hit)) matchedX.push(hit)
+  }
+  const matchedY: number[] = []
+  for (const v of ownY) {
+    const hit = near(refY, v)
+    if (hit !== null && !matchedY.includes(hit)) matchedY.push(hit)
+  }
+
+  guides.value = { x: matchedX, y: matchedY }
 }
 
 const measureMobileHeight = () => {
@@ -279,13 +313,13 @@ const onDrag = (event: MouseEvent) => {
     )
     const top = Math.max(12, align(dragInitial.top + totalDy / canvasScale.value))
     editorStore.applyComponentStyle(dragId, { left, top })
-    updateGuides(left, top, width, dragInitial.height)
+    updateGuides(left, top, width, dragInitial.height, dragId)
     return
   }
   const left = Math.max(0, align(dragInitial.left + (event.clientX - dragStartX) / canvasScale.value))
   const top = Math.max(0, align(dragInitial.top + (event.clientY - dragStartY) / canvasScale.value))
   editorStore.applyComponentStyle(dragId, { left, top })
-  updateGuides(left, top, dragInitial.width, dragInitial.height)
+  updateGuides(left, top, dragInitial.width, dragInitial.height, dragId)
 }
 
 const stopDrag = () => {
@@ -384,7 +418,7 @@ const onResize = (event: MouseEvent) => {
   if (resizeDir.includes('b')) height = Math.max(40, resizeInitial.height + dy)
   left = Math.max(0, align(left)); top = Math.max(0, align(top)); width = align(width); height = align(height)
   editorStore.applyComponentStyle(resizeId, { left, top, width, height })
-  updateGuides(left, top, width, height)
+  updateGuides(left, top, width, height, resizeId)
 }
 
 const stopResize = () => {

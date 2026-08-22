@@ -188,6 +188,17 @@ export const componentProtocols: ComponentProtocol[] = [
     defaultProps: {
       chartType: 'bar',
       title: '数据统计',
+      showLegend: true,
+      legendPosition: 'bottom',
+      showXAxis: true,
+      showYAxis: true,
+      xAxisName: '',
+      yAxisName: '',
+      valueUnit: '',
+      primaryColor: '#5470c6',
+      secondaryColor: '#91cc75',
+      accentColor: '#fac858',
+      tooltipFormat: 'name-value',
       data: [
         { name: '一月', value: 120 },
         { name: '二月', value: 200 },
@@ -198,8 +209,19 @@ export const componentProtocols: ComponentProtocol[] = [
       ]
     },
     schema: [
-      { key: 'chartType', label: '图表类型', type: 'select', options: ['bar', 'line', 'pie'] },
+      { key: 'chartType', label: '图表类型', type: 'select', options: ['bar', 'line', 'pie'], optionLabels: { bar: '柱状图', line: '折线图', pie: '饼图' } },
       { key: 'title', label: '图表标题', type: 'string', placeholder: '请输入图表标题' },
+      { key: 'showLegend', label: '显示图例', type: 'boolean' },
+      { key: 'legendPosition', label: '图例位置', type: 'select', options: ['top', 'bottom', 'right'], optionLabels: { top: '顶部', bottom: '底部', right: '右侧' } },
+      { key: 'showXAxis', label: '显示 X 轴', type: 'boolean' },
+      { key: 'showYAxis', label: '显示 Y 轴', type: 'boolean' },
+      { key: 'xAxisName', label: 'X 轴名称', type: 'string', placeholder: '例如：月份' },
+      { key: 'yAxisName', label: 'Y 轴名称', type: 'string', placeholder: '例如：销售额' },
+      { key: 'valueUnit', label: '数值单位', type: 'string', placeholder: '例如：元、%、人' },
+      { key: 'primaryColor', label: '主色', type: 'color' },
+      { key: 'secondaryColor', label: '辅助色', type: 'color' },
+      { key: 'accentColor', label: '强调色', type: 'color' },
+      { key: 'tooltipFormat', label: '提示格式', type: 'select', options: ['name-value', 'value', 'percent'], optionLabels: { 'name-value': '名称 + 数值', value: '仅数值', percent: '百分比' } },
       { key: 'data', label: '数据（名称,数值，每行一条）', type: 'array', arrayFormat: 'name-value-lines' }
     ]
   }

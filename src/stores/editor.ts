@@ -17,6 +17,7 @@ import { getComponentProtocol } from '@/components/components/registry'
 import { SCHEMA_VERSION, migratePageData } from './migration'
 import { validateAndRepairPageData } from './pageImport'
 import { MOBILE_AVAILABLE_WIDTH } from '@/utils/mobile'
+import { estimateTextHeight } from '@/utils/textLayout'
 
 const STORAGE_KEY = 'marketing-editor-page'
 const GRID_SIZE = 10
@@ -410,15 +411,56 @@ export const useEditorStore = defineStore('editor', () => {
 
     const prevProps = clone(component.props)
     const newProps = clone(nextProps)
+    const prevStyle = clone(component.style)
+    const prevOverrides = clone(component.responsiveOverrides || {})
+    const nextStyle = clone(component.style)
+    const nextOverrides = clone(component.responsiveOverrides || {})
+
+    if (component.type === ComponentType.TEXT) {
+      const content = (newProps as { content?: unknown }).content
+      nextStyle.height = Math.max(
+        nextStyle.height,
+        estimateTextHeight(content, nextStyle.width, nextStyle.fontSize, nextStyle.lineHeight)
+      )
+      const mobile = { ...nextStyle, ...(nextOverrides.mobile || {}) }
+      const mobileHeight = estimateTextHeight(content, mobile.width, mobile.fontSize, mobile.lineHeight)
+      if (mobileHeight > mobile.height) {
+        nextOverrides.mobile = { ...(nextOverrides.mobile || {}), height: mobileHeight }
+      }
+    }
 
     useHistoryStore().executeCommand({
       label: '更新组件属性',
       execute: () => {
         component.props = clone(newProps)
+        component.style = clone(nextStyle)
+        component.responsiveOverrides = clone(nextOverrides)
         touchPageMeta()
       },
       undo: () => {
         component.props = clone(prevProps)
+        component.style = clone(prevStyle)
+        component.responsiveOverrides = clone(prevOverrides)
+        touchPageMeta()
+      }
+    })
+  }
+
+  const renameComponent = (componentId: string, rawName: string) => {
+    if (!currentPage.value) return
+    const component = currentPage.value.components.find((item) => item.id === componentId)
+    if (!component) return
+    const nextName = rawName.trim().slice(0, 80)
+    if (!nextName || nextName === component.name) return
+    const previousName = component.name
+    useHistoryStore().executeCommand({
+      label: '重命名图层',
+      execute: () => {
+        component.name = nextName
+        touchPageMeta()
+      },
+      undo: () => {
+        component.name = previousName
         touchPageMeta()
       }
     })
@@ -677,6 +719,7 @@ export const useEditorStore = defineStore('editor', () => {
     commitComponentStyle,
     applyComponentStyle,
     commitComponentProps,
+    renameComponent,
     commitComponentEvents,
     deleteComponent,
     moveComponentLayer,

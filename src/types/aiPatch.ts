@@ -11,9 +11,16 @@ export interface AIConversationMessage {
   patchSummary?: string
 }
 
+export interface AIConversationMemory {
+  userGoals: string[]
+  designConstraints: string[]
+  completedChanges: string[]
+  openQuestions: string[]
+}
+
 export interface AIConversationSession {
   pageId: string
-  summary: string
+  memory: AIConversationMemory
   recentMessages: AIConversationMessage[]
   pageRevision: number
   updatedAt: string
@@ -54,6 +61,7 @@ export type AIPageOperation =
       name?: string
       props?: Record<string, unknown>
       style?: Partial<ComponentStyle>
+      mobileStyle?: Partial<ComponentStyle>
       device?: DeviceType
     }
   | {
@@ -78,12 +86,38 @@ export interface AIClarification {
   question: string
 }
 
-export type AIEditResponse = AIPagePatch | AIClarification
+export interface AIPageEditPlanStep {
+  id: string
+  title: string
+  instruction: string
+  scope: 'page' | 'components'
+  operationBudget: number
+}
+
+export interface AIPageEditPlan {
+  type: 'page_edit_plan'
+  planId: string
+  summary: string
+  steps: AIPageEditPlanStep[]
+}
+
+export interface AIEditExecutionContext {
+  planId: string
+  planSummary: string
+  originalRequest: string
+  stepIndex: number
+  stepCount: number
+  step: AIPageEditPlanStep
+  validationError?: string
+}
+
+export type AIEditResponse = AIPagePatch | AIClarification | AIPageEditPlan
 
 export interface AIEditRequest {
   message: string
   page: PageData
   baseRevision: number
   recentMessages: AIConversationMessage[]
-  conversationSummary: string
+  conversationMemory: AIConversationMemory
+  execution?: AIEditExecutionContext
 }

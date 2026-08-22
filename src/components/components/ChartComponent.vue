@@ -11,6 +11,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import * as echarts from 'echarts'
 import type { ComponentData } from '@/types'
 import type { ChartProps } from '@/types'
+import { buildChartOption } from '@/utils/chartOption'
 
 const props = defineProps<{
   component: ComponentData
@@ -32,61 +33,12 @@ const containerStyle = computed(() => {
   }
 })
 
-const getChartOption = () => {
-  const chartProps = props.component.props as unknown as ChartProps
-  const { chartType, title, data } = chartProps
-
-  const baseOption: echarts.EChartsOption = {
-    title: {
-      text: title,
-      textStyle: { fontSize: 14, fontWeight: 600 },
-      left: 'center'
-    },
-    tooltip: {},
-    grid: { left: 40, right: 20, top: 40, bottom: 30 },
-    series: []
-  }
-
-  if (chartType === 'pie') {
-    return {
-      ...baseOption,
-      series: [{
-        type: 'pie',
-        radius: ['30%', '60%'],
-        center: ['50%', '55%'],
-        data: data.map(item => ({ name: item.name, value: item.value })),
-        label: { show: true, formatter: '{b}: {c}' }
-      }]
-    }
-  }
-
-  return {
-    ...baseOption,
-    xAxis: {
-      type: 'category',
-      data: data.map(item => item.name),
-      axisLabel: { fontSize: 11 }
-    },
-    yAxis: { type: 'value' },
-    series: [{
-      type: chartType,
-      data: data.map(item => item.value),
-      itemStyle: {
-        color: chartType === 'bar' ? '#5470c6' : '#ee6666',
-        borderRadius: chartType === 'bar' ? [4, 4, 0, 0] : 0
-      },
-      lineStyle: { width: 3 },
-      symbolSize: 6
-    }]
-  }
-}
-
 const renderChart = () => {
   if (!chartRef.value) return
   if (!chartInstance) {
     chartInstance = echarts.init(chartRef.value)
   }
-  chartInstance.setOption(getChartOption(), true)
+  chartInstance.setOption(buildChartOption(props.component.props as unknown as ChartProps), true)
 }
 
 onMounted(() => {

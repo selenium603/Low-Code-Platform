@@ -108,8 +108,9 @@
                   <el-input v-else-if="field.type === 'string'" v-model="(localProps as Record<string, unknown>)[field.key]" :type="field.control === 'textarea' ? 'textarea' : 'text'" :rows="field.control === 'textarea' ? 4 : undefined" :placeholder="field.placeholder" @change="commitProps" />
                   <el-input-number v-else-if="field.type === 'number'" v-model="(localProps as Record<string, unknown>)[field.key]" :min="field.min" :max="field.max" :step="field.step || 1" @change="commitProps" />
                   <el-color-picker v-else-if="field.type === 'color'" v-model="(localProps as Record<string, unknown>)[field.key]" show-alpha @change="commitProps" />
+                  <el-switch v-else-if="field.type === 'boolean'" v-model="(localProps as Record<string, unknown>)[field.key]" @change="commitProps" />
                   <el-select v-else-if="field.type === 'select'" v-model="(localProps as Record<string, unknown>)[field.key]" @change="commitProps">
-                    <el-option v-for="option in field.options" :key="option" :label="option" :value="option" />
+                    <el-option v-for="option in field.options" :key="option" :label="field.optionLabels?.[option] || option" :value="option" />
                   </el-select>
                   <el-input v-else-if="field.type === 'array'" :model-value="formatArrayField(field)" type="textarea" :rows="5" :placeholder="arrayPlaceholder(field)" @change="commitArrayField(field, $event)" />
                 </div>
