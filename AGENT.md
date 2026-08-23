@@ -114,11 +114,12 @@ npm run build
 - `vite.config.ts`
   - 开发环境 AI 接口中间件；
   - 两阶段提示词、模型请求、SSE 解析、布局规范化、Schema 校验和重试均在此；
-  - 当前真正注册的是 `aiPageGeneratorV2()`；文件顶部旧的 `aiPageGenerator` 未使用，是待清理技术债。
+  - 当前注册并使用的是 `aiPageGeneratorV2()`。
+- `server/structuredSchemas.ts`
+  - 集中维护页面、布局计划、增量 Patch、大幅修改计划和 RAG 组件定位所用的 strict Structured Output JSON Schema；
+  - 提供 `strictResponseFormat` 和 nullable 字段压缩工具，模型结果进入既有应用校验前会先移除值为 `null` 的可选字段。
 - `.env.example`
   - AI 环境变量示例。真实密钥应只放 `.env.local`，禁止提交或写入交接文档。
-- `AI_PAGE_GENERATION_HANDOFF.md`
-  - AI 页面生成专项历史交接材料，可作为补充阅读，但实现细节以当前代码为准。
 
 ### 其他
 
@@ -147,6 +148,15 @@ ComponentData
 ```
 
 当前组件类型：`Text`、`Image`、`Button`、`Input`、`Form`、`Chart`。
+
+核心 props 协议：
+
+- `Text`：`content`；
+- `Image`：`src`、`alt`、`objectFit`；
+- `Button`：`content`、`type`；
+- `Input`：`placeholder`、`value`、`inputType`；
+- `Form`：`title`、`submitText`、`fields`；
+- `Chart`：`chartType`、`title`、`data`，以及图例、坐标轴、单位、主题色和 tooltip 配置字段。
 
 组件注册表是扩展组件库的中心。新增组件时通常需要同步处理：
 
@@ -186,8 +196,9 @@ ComponentData
 
 ```text
 用户自然语言
-→ 第一阶段生成布局计划
-→ 第二阶段按计划生成 Page Schema
+→ 第一阶段通过 strict Structured Output 生成布局计划
+→ 第二阶段按计划通过 strict Structured Output 生成 Page Schema
+→ compact nullable 可选字段
 → 服务端规范化与布局校验
 → 不通过时把具体错误反馈给模型重试（最多 3 次）
 → SSE 返回页面
@@ -200,7 +211,8 @@ ComponentData
 ```text
 用户继续提出修改
 → 发送当前 Page Schema + 最近 6 条消息 + 结构化记忆 + baseRevision
-→ AI 只返回领域化 Patch 或澄清问题
+→ AI 通过 strict Structured Output 只返回领域化 Patch 或澄清问题
+→ compact nullable 可选字段
 → 服务端校验操作白名单与稳定组件 ID
 → 前端在页面副本中执行并复用导入校验
 → 检查请求期间 revision 是否变化
@@ -295,17 +307,20 @@ MOBILE_AVAILABLE_WIDTH = 351
 - `AI_RAG_ENABLED`（默认启用；仅影响 40+ 组件页面）
 - `AI_EMBEDDING_MODEL`（默认 `openai/text-embedding-3-small`）
 - `AI_EMBEDDING_BASE_URL` / `AI_EMBEDDING_API_KEY`（可选，留空时复用聊天接口地址和 OpenRouter Key）
+- `AI_REASONING_ENABLED` 是早期兼容配置；当前页面生成和编辑请求在实现中固定关闭 reasoning，修改该变量不会重新打开推理模式。
 
 当前请求重点参数：
 
-- `response_format: { type: "json_object" }`；
+- 所有实际结构化 LLM 调用都使用 `response_format.type = "json_schema"` 与 `strict: true`，Schema 统一定义在 `server/structuredSchemas.ts`；
 - reasoning 关闭；
 - temperature 约 0.2；
-- 主生成 `max_tokens` 约 3100；
+- 主生成 `max_tokens` 约 3800；
 - 流式响应；
 - 约 45 秒空闲超时，会随数据块到达重置，不是固定总时长。
 
-不要在项目介绍中声称当前已使用严格 Function Calling / JSON Schema 强约束。旧实现尝试过更严格的格式，但实际接口兼容性有问题；当前主要依靠 `json_object` 加应用侧校验修复。
+当前采用的是 **strict Structured Output（JSON Schema）**，没有采用 Function Calling：这里的任务目标是约束模型返回数据，而不是让模型选择并调用外部工具。strict 只保证输出满足声明的结构、类型和必填字段，不能保证组件引用存在、revision 正确、布局不重叠或操作符合业务权限，因此应用侧语义与安全校验仍是不可替代的第二道防线。
+
+布局计划、最终 PageData、大幅修改计划、RAG 组件定位和最终增量 Patch 均使用各自的 strict Schema。为满足 strict Schema 对对象字段完整性的要求，可选字段在模型输出中以 nullable 表达；解析后由 `compactStructuredValue` 移除值为 `null` 的字段，再送入原有规范化、白名单、ID、边界、重叠和 revision 校验，避免 `null` 改变既有领域协议语义。
 
 ### 两阶段生成
 
@@ -322,12 +337,20 @@ MOBILE_AVAILABLE_WIDTH = 351
 
 第二阶段根据该计划生成 4–6 个核心组件的完整 Page Schema。复杂页面相比单次生成更容易保持布局稳定。
 
+### 流式进度与超时策略
+
+客户端和服务端通过 SSE 展示规划、请求模型、收到首个响应、接收 JSON、校验、重试和成功导入等阶段。主生成使用流式输出，由 `collectStreamContent` 聚合上游 `delta.content`。
+
+早期实现等待完整 JSON，曾出现 60/90 秒超时。历史直连诊断中，最小请求约 1.3 秒；完整提示词生成简单商品筛选页约 1.4 秒收到首个流式数据块、约 26.6 秒完成，说明模型一直在输出而不是不可用。当前因此采用“连续约 45 秒没有任何数据块才超时”的空闲超时，而不是固定总时长；同时关闭 reasoning、限制组件数和 token，避免额外等待。
+
 ### 规范化与校验链
 
 模型 JSON 解析后，大致执行：
 
 ```text
-normalizeDecorativeImages
+strict JSON Schema 结构约束
+→ compactStructuredValue
+→ normalizeDecorativeImages
 → normalizeForms
 → normalizeContentLayout
 → normalizeMobileLayout
@@ -349,6 +372,12 @@ normalizeDecorativeImages
 - Text 组件会按实际文案、宽度、字号和行高估算双端最低高度；应用侧会覆盖模型低估的高度，防止固定容器配合 `overflow: hidden` 裁切文字。
 
 仍有错误时，会把具体错误追加到下一轮提示词中，最多生成 3 次。前端收到结果后还会通过 `validateAndRepairPageData` 做第二道校验，因此服务端布局校验与前端 Schema 安全校验是分层互补的。
+
+### 已解决的生成链路故障
+
+- “接口成功但画布空白”：`importGeneratedPage` 与普通 JSON 导入共用 `validateAndRepairPageData`；修复后若组件数为 0 会直接报错，成功时切回 PC、选中首个组件。`EditorCanvas` 监听页面 `id`，整页替换后即使尺寸和组件数相同也会重新适配画布。
+- “严格重叠规则限制设计”：普通内容继续禁止重叠；旋转、低层级或名称明确为背景/装饰的 Image 可以受控重叠，并由规范化逻辑修正轻微越界和层级。
+- “错误全部归因于 Prompt”：排查时应区分上游接口拒绝、流式连接连续无数据、JSON/strict 输出失败、服务端语义校验失败，以及前端页面副本中的边界/重叠失败。
 
 ## 9. JSON 安全、迁移与事件
 
@@ -376,9 +405,9 @@ normalizeDecorativeImages
 - `removeComponent`
 - `moveLayer`
 
-模型无权修改组件 ID。`placeRelative` 只描述“上方/下方/左侧/右侧”等关系，具体坐标由应用计算。目标存在歧义时，接口返回 `need_clarification`，不能猜测修改对象。
+模型无权修改组件 ID。增量 Patch 的 strict Schema 会按本轮页面动态构建：`updateProps` 按目标组件的真实类型约束属性，`componentId/targetId` 使用当前允许稳定 ID 的枚举，并收紧 `baseRevision`、操作白名单和数量上限；随后 `validateAIEditResult` 再复核目标 ID 与字段语义。`placeRelative` 只描述“上方/下方/左侧/右侧”等关系，具体坐标由应用计算。目标存在歧义时，接口返回 `need_clarification`，不能猜测修改对象。
 
-编辑器维护单调递增的 `pageRevision`。AI 请求返回时若 revision 已变化，说明用户在等待期间进行了手工编辑，本次 Patch 会被拒绝，避免覆盖新操作。一次 Patch 在页面副本上完整执行，通过后由 `applyAIPagePatchTransaction` 作为一条命令进入历史栈。
+编辑器维护单调递增的 `pageRevision`。AI 请求返回时若 revision 已变化，说明用户在等待期间进行了手工编辑，本次 Patch 会被拒绝，避免覆盖新操作。一次 Patch 在页面副本上完整执行；普通增量修改若因边界、重叠等应用校验失败，会携带失败 Patch 和精确错误自动请求一次修正版，第二次仍失败才向用户报错。通过后由 `applyAIPagePatchTransaction` 作为一条命令进入历史栈。
 
 ### 大幅修改的 P0/P1 分阶段事务
 
@@ -444,6 +473,10 @@ AI 新页面布局修复后完成真实链路回归：使用“主标题 + 产�
 
 AI 结构化记忆改造已通过 `npm run type-check` 和 `npm run build`；旧 `summary` 字符串会在会话 Store 首次加载时迁移，接口仍保留旧字段的服务端降级兼容。
 
+AI 生成、规划、RAG 定位与增量修改的实际结构化模型请求已统一切换为 strict Structured Output；输出在 nullable 字段压缩后仍复用原有语义/安全校验，页面修改仍在副本中执行，并经 revision 检查后以单条命令事务提交。项目没有使用 Function Calling。
+
+普通增量修改的应用失败闭环已用“副标题增长后与主视觉重叠”的最小场景完成真实 API 回归：第一次失败 Patch 和精确重叠错误会自动回填，修正版保留扩充文案，并分别调整 PC/手机端主视觉位置恢复 20px 间距。
+
 构建存在非阻塞警告：主 JS 包约 2.35 MB，超过 500 kB 建议阈值，主要可能来自 ECharts 和 Element Plus。后续可通过按需加载、动态 import 或 `manualChunks` 优化。
 
 当前没有完善的自动化测试体系。修改核心逻辑后至少应执行 type-check 和 build，并人工检查：
@@ -460,7 +493,6 @@ AI 结构化记忆改造已通过 `npm run type-check` 和 `npm run build`；旧
 ## 12. 已知边界与技术债
 
 - `vite.config.ts` 过大，同时承载提示词、HTTP、流式解析、规范化和校验，建议拆分到独立 server 模块；
-- 文件顶部仍有未使用的旧 `aiPageGenerator`；
 - HTML 导出逻辑较大且内联在 `Editor.vue`，适合抽离；
 - 手机端仍是“375 基准 + 小屏规则 + 绝对纵向布局”，不是任意手机宽度下的完全连续响应式；
 - 390/414 等宽屏手机目前通常是最大 375px 居中显示；
@@ -520,4 +552,34 @@ AI 结构化记忆改造已通过 `npm run type-check` 和 `npm run build`；旧
 
 ## 16. 一句话讲解口径
 
-这是一个以统一 Page Schema 为核心的 Vue 3 低代码页面编辑器：手工编辑、JSON 导入和 AI 生成共享同一数据协议，编辑器用组件注册表驱动渲染和属性配置，用命令模式保证可撤销操作，用 PC 基准加手机差异覆盖实现双端编辑，并通过“两阶段生成 + 应用侧规范化校验 + 最多三次反馈重试”把自然语言稳定转换成可继续编辑的页面。
+这是一个以统一 Page Schema 为核心的 Vue 3 低代码页面编辑器：手工编辑、JSON 导入和 AI 生成共享同一数据协议，编辑器用组件注册表驱动渲染和属性配置，用命令模式保证可撤销操作，用 PC 基准加手机差异覆盖实现双端编辑，并通过“两阶段生成 + strict Structured Output + 应用侧规范化校验 + 分层反馈重试”把自然语言稳定转换成可继续编辑的页面。
+
+## 17. AI 专项讲解与常见追问
+
+### 一句话介绍 AI 页面生成
+
+“我把 AI 能力接在低代码编辑器已有的 Page Schema 上，让模型通过 strict Structured Output 返回可编辑 JSON 而不是代码；服务端负责布局规划、结构和几何校验、可恢复错误规范化及反馈重试，前端通过 SSE 展示过程，最后复用现有组件渲染、属性配置、双端布局和导出链路。”
+
+### 为什么不让 AI 直接生成 Vue 或 HTML？
+
+直接生成代码不能自然接入编辑器的选中、拖拽、属性面板、PC/手机适配、撤销重做和 Schema 迁移。Page Schema 是编辑器的领域模型，AI 只负责生成领域数据，组件注册表和渲染器负责把数据映射为 Vue 组件，职责边界更稳定。
+
+### 如何保证 AI 输出可靠？
+
+可靠性不只依赖 Prompt：先用 strict Structured Output 约束 JSON 结构、类型、枚举和必填字段，再由应用检查组件协议、稳定 ID、revision、操作权限、画布边界、最小尺寸和几何重叠。可安全恢复的问题直接规范化；不能安全恢复的问题把精确错误反馈给模型。增量 Patch 先在页面副本执行，全部通过后才事务提交。
+
+### 为什么使用 Structured Output，而不是 Function Calling？
+
+这里的目标是约束模型返回 Page Schema、布局计划或 Patch 数据，而不是让模型选择并调用外部工具，因此 strict Structured Output 更直接。当前 OpenRouter/Qwen 路由已经真实验证普通、复杂嵌套和流式 strict Schema；Function Calling 虽然也受支持，但没有必要增加工具调用语义。
+
+### 生成超时是怎么解决的？
+
+先通过直连诊断排除 Key 和模型不可用，再确认旧链路在等待完整 JSON。随后改为上游流式读取和前端 SSE 进度，用“连续无数据空闲超时”代替总超时，同时关闭 reasoning、限制 token 和组件数，并把真实阶段反馈给用户。
+
+### 重叠校验会不会限制设计？
+
+不能使用一刀切规则。普通内容重叠通常是布局错误，但低层级旋转图片作为背景装饰是合理设计，因此采用“内容严格、装饰受控”的策略。生成和增量修改都在应用侧按同一规则区分普通内容与装饰元素。
+
+### 纯前端项目如何保护模型 API Key？
+
+生产环境不能把长期 Key 打进浏览器包。当前 Vite middleware 只适合本地开发；上线时应迁移到 Serverless、Edge Function 或 BFF，Key 存在服务端密钥库，并增加鉴权、限流、审计、预算和异常监控。纯静态页面让用户填写个人 Key 只能作为个人开发工具，不能作为面向终端用户的生产方案。

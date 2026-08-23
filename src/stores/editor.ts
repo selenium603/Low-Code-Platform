@@ -196,6 +196,13 @@ const normalizePageData = (page: PageData): PageData => {
   return nextPage
 }
 
+/** 按当前数组顺序把图层整理为连续的 1…N，避免删除后留下空洞或重复层级。 */
+const reindexComponentLayers = (components: ComponentData[]) => {
+  components.forEach((component, index) => {
+    component.style.zIndex = index + 1
+  })
+}
+
 export const useEditorStore = defineStore('editor', () => {
   const currentPage = ref<PageData | null>(null)
   const currentComponent = ref<ComponentData | null>(null)
@@ -268,12 +275,15 @@ export const useEditorStore = defineStore('editor', () => {
     if (!protocol) return
 
     const historyStore = useHistoryStore()
-    const nextZIndex = currentPage.value.components.length + 1
+    const nextZIndex = currentPage.value.components.reduce(
+      (maximum, item) => Math.max(maximum, Number(item.style.zIndex) || 0),
+      0
+    ) + 1
     const component = createProtocolComponent(type, {
       ...initialData,
       style: {
-        zIndex: nextZIndex,
-        ...initialData.style
+        ...initialData.style,
+        zIndex: nextZIndex
       }
     })
     // 移动端新增组件时将 responsiveOverrides 一并纳入命令，确保撤销/重做完整
@@ -285,6 +295,10 @@ export const useEditorStore = defineStore('editor', () => {
       label: `新增${protocol.label}`,
       execute: () => {
         if (!currentPage.value) return
+        component.style.zIndex = currentPage.value.components.reduce(
+          (maximum, item) => Math.max(maximum, Number(item.style.zIndex) || 0),
+          0
+        ) + 1
         const normalized = normalizeComponentLayout(component, currentPage.value)
         currentPage.value.components.push(normalized)
         currentComponent.value = normalized
@@ -523,13 +537,17 @@ export const useEditorStore = defineStore('editor', () => {
     useHistoryStore().executeCommand({
       label: '删除组件',
       execute: () => {
-        currentPage.value?.components.splice(index, 1)
+        if (!currentPage.value) return
+        currentPage.value.components.splice(index, 1)
+        reindexComponentLayers(currentPage.value.components)
         if (wasSelected) currentComponent.value = null
         touchPageMeta()
       },
       undo: () => {
-        currentPage.value?.components.splice(index, 0, component)
-        if (wasSelected) currentComponent.value = component
+        if (!currentPage.value) return
+        currentPage.value.components.splice(index, 0, component)
+        reindexComponentLayers(currentPage.value.components)
+        if (wasSelected) currentComponent.value = currentPage.value.components[index] || null
         touchPageMeta()
       }
     })

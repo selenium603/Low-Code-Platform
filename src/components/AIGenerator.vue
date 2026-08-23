@@ -296,12 +296,67 @@ const edit = async (message: string, signal: AbortSignal) => {
     }
     summary = plan.summary
   } else {
-    progressText.value = '正在校验并事务式应用增量修改…'
-    const applied = applyAIPagePatch(nextPage, response.result)
-    nextPage = applied.page
-    summary = applied.patch.summary
-    operationCount = applied.patch.operations.length
-    allWarnings.push(...applied.warnings)
+    let patch = response.result
+    for (let applicationAttempt = 1; applicationAttempt <= 2; applicationAttempt += 1) {
+      progressText.value = applicationAttempt === 1
+        ? '正在校验并事务式应用增量修改…'
+        : '正在校验 AI 修正后的增量修改…'
+      try {
+        const applied = applyAIPagePatch(nextPage, patch)
+        nextPage = applied.page
+        summary = applied.patch.summary
+        operationCount = applied.patch.operations.length
+        allWarnings.push(...applied.warnings)
+        break
+      } catch (error) {
+        const validationError = error instanceof Error ? error.message : '页面副本校验失败'
+        if (applicationAttempt === 2) {
+          throw new Error(`AI 修改连续两次校验失败：${validationError}。真实页面未发生变化。`)
+        }
+
+        throwIfAborted(signal)
+        if (editorStore.pageRevision !== baseRevision) {
+          throw new Error('AI 处理期间页面已发生修改。为避免覆盖手工操作，请重新发送这条要求。')
+        }
+        progressText.value = `页面副本校验失败：${validationError} 正在要求 AI 修正 Patch…`
+        let repairResponse: Awaited<ReturnType<typeof editPageFromPrompt>>
+        try {
+          repairResponse = await editPageFromPrompt({
+            message,
+            page: JSON.parse(JSON.stringify(page)),
+            baseRevision,
+            recentMessages: requestMessages,
+            conversationMemory: requestMemory,
+            repairContext: {
+              validationError,
+              previousPatch: patch
+            }
+          }, (progress) => { progressText.value = `正在修正布局：${progress}` }, signal)
+        } catch (repairError) {
+          if (isAbortError(repairError)) conversationStore.removeMessage(page.id, pendingMessage.id)
+          throw repairError
+        }
+
+        await waitForCloseDecision()
+        if (signal.aborted) {
+          conversationStore.removeMessage(page.id, pendingMessage.id)
+          throwIfAborted(signal)
+        }
+        if (editorStore.pageRevision !== baseRevision) {
+          throw new Error('AI 处理期间页面已发生修改。为避免覆盖手工操作，请重新发送这条要求。')
+        }
+        if (repairResponse.result.type === 'need_clarification') {
+          conversationStore.appendMessage(page.id, baseRevision, 'assistant', repairResponse.result.question)
+          conversationStore.rememberUserIntent(page.id, baseRevision, message)
+          conversationStore.rememberOpenQuestion(page.id, baseRevision, repairResponse.result.question)
+          return
+        }
+        if (repairResponse.result.type === 'page_edit_plan') {
+          throw new Error('AI 修正请求返回了新的大改计划，已取消本次修改。')
+        }
+        patch = repairResponse.result
+      }
+    }
   }
 
   if (editorStore.pageRevision !== baseRevision) {

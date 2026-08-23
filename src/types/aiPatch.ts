@@ -111,6 +111,11 @@ export interface AIEditExecutionContext {
   validationError?: string
 }
 
+export interface AIEditRepairContext {
+  validationError: string
+  previousPatch: AIPagePatch
+}
+
 export type AIEditResponse = AIPagePatch | AIClarification | AIPageEditPlan
 
 export interface AIEditRequest {
@@ -120,4 +125,5 @@ export interface AIEditRequest {
   recentMessages: AIConversationMessage[]
   conversationMemory: AIConversationMemory
   execution?: AIEditExecutionContext
+  repairContext?: AIEditRepairContext
 }

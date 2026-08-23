@@ -435,7 +435,7 @@ const handleExportHTML = () => {
 
 const handleSave = () => {
   editorStore.persistPage()
-  ElMessage.success('页面已持久化保存')
+  ElMessage.success('页面已保存')
 }
 
 const handleNewPage = () => {

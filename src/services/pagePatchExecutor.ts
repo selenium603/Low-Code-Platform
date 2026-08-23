@@ -213,7 +213,10 @@ const addComponent = (page: PageData, operation: Extract<AIPageOperation, { op: 
     style: {
       ...clone(protocol.defaultStyle),
       ...(operation.device === DeviceType.MOBILE ? {} : styleChanges),
-      zIndex: page.components.length + 1
+      zIndex: page.components.reduce(
+        (maximum, item) => Math.max(maximum, Number(item.style.zIndex) || 0),
+        0
+      ) + 1
     },
     props: {
       ...clone(protocol.defaultProps),

@@ -1,3 +1,5 @@
+import { compactStructuredValue, largeEditResponseSchema, strictResponseFormat } from './structuredSchemas'
+
 export interface LargeEditPlanStep {
   id: string
   title: string
@@ -78,9 +80,9 @@ const parsePlan = (value: unknown): Omit<LargeEditPlan, 'planId'> | LargeEditCla
 export const createLargeEditPlan = async (options: PlanOptions): Promise<LargeEditPlan | LargeEditClarification> => {
   const system = `你是低代码页面“大幅修改”的任务规划器。只输出 JSON，不生成页面 Schema，不生成 Patch。
 
-返回二选一：
-1. {"type":"page_edit_plan","summary":"总体目标","steps":[{"id":"step-1","title":"步骤标题","instruction":"可独立执行的具体要求","scope":"page|components","operationBudget":1}]}
-2. {"type":"need_clarification","question":"缺少关键信息时只问一个问题"}
+严格输出统一信封对象：
+1. 计划：{"type":"page_edit_plan","summary":"总体目标","steps":[...],"question":null}
+2. 澄清：{"type":"need_clarification","summary":null,"steps":null,"question":"缺少关键信息时只问一个问题"}
 
 规则：把任务拆成 2～6 步，每步预计 1～8 个 Patch 操作，总操作最多 48；每个 instruction 必须自包含，说明组件数量、类型、文案方向、桌面区域和手机端顺序，不能使用“继续上一步”等模糊指代。可用组件只有 Text、Image、Button、Input、Form、Chart，不存在 Container、Icon 或组件组。新增大量组件时，第一步必须先用 updatePageStyle 分别扩展 desktop/mobile 页面高度，后续每步新增不超过 operationBudget 且最多 8 个组件；新增、添加、创建组件的步骤 scope 必须使用 page。修改现有组件时 scope 使用 components。优先按首屏、卖点、数据、案例、转化等语义分区拆分。不要在计划中输出具体 JSON 操作。若用户目标无法在 48 个操作内完成，应询问用户缩小范围。`
   const context = {
@@ -105,7 +107,7 @@ export const createLargeEditPlan = async (options: PlanOptions): Promise<LargeEd
           { role: 'user', content: `${JSON.stringify(context)}${lastError ? `\n上次计划无效：${lastError}。请缩短并输出完整 JSON。` : ''}` }
         ],
         reasoning: { enabled: false },
-        response_format: { type: 'json_object' },
+        response_format: strictResponseFormat('large_page_edit_plan', largeEditResponseSchema),
         temperature: 0.1,
         max_tokens: attempt === 1 ? 1100 : 1400
       }),
@@ -124,7 +126,9 @@ export const createLargeEditPlan = async (options: PlanOptions): Promise<LargeEd
       continue
     }
     try {
-      const parsed = choice?.message?.content ? parsePlan(JSON.parse(choice.message.content)) : null
+      const parsed = choice?.message?.content
+        ? parsePlan(compactStructuredValue(JSON.parse(choice.message.content)))
+        : null
       if (parsed?.type === 'need_clarification') return parsed
       if (parsed?.type === 'page_edit_plan') {
         const requestedTarget = [...options.request.matchAll(/(\d+)\s*\+?\s*(?:个)?组件/g)]
