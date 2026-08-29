@@ -15,7 +15,7 @@ const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
 
 const STYLE_NUMBER_KEYS: Array<keyof ComponentStyle> = [
-  'top', 'left', 'width', 'height', 'zIndex', 'rotate', 'opacity',
+  'top', 'left', 'width', 'height', 'rotate', 'opacity',
   'fontSize', 'fontWeight', 'lineHeight', 'borderWidth', 'borderRadius'
 ]
 const STYLE_COLOR_KEYS: Array<keyof ComponentStyle> = ['color', 'backgroundColor', 'borderColor']
@@ -64,6 +64,49 @@ const isDecorativeComponent = (component: ComponentData, style: ComponentStyle) 
     || /(^|[-_\s])(bg|background|deco|decorative)([-_\s]|$)|背景|装饰/i.test(`${component.id} ${component.name}`)
   )
 )
+
+type GeometryValidation = { id: string; device: DeviceType; gap: number }
+
+const conflictsWithGap = (first: ComponentStyle, second: ComponentStyle, gap: number) => (
+  first.left < second.left + second.width + gap
+  && first.left + first.width + gap > second.left
+  && first.top < second.top + second.height + gap
+  && first.top + first.height + gap > second.top
+)
+
+/**
+ * 只校验本轮发生几何或层级变化的组件，避免历史页面中的旧布局问题阻断无关修改。
+ * 装饰图只有位于内容下层时才允许重叠，与整页生成链路保持一致。
+ */
+const validateChangedGeometry = (page: PageData, changes: GeometryValidation[]) => {
+  for (const changed of changes) {
+    const component = getComponent(page, changed.id)
+    const style = effectiveStyle(component, changed.device)
+    const pageStyle = changed.device === DeviceType.DESKTOP
+      ? page.style
+      : { ...page.style, ...(page.responsiveOverrides?.mobile || {}) }
+    const padding = changed.device === DeviceType.MOBILE ? MOBILE_PADDING : 0
+    if (
+      style.left < padding
+      || style.top < padding
+      || style.left + style.width > pageStyle.width - padding
+      || style.top + style.height > pageStyle.height - padding
+    ) {
+      throw new Error(`AI 修改会导致“${component.name}”超出${changed.device === DeviceType.MOBILE ? '手机端' : '桌面端'}页面边界。`)
+    }
+
+    for (const other of page.components) {
+      if (other.id === component.id) continue
+      const otherStyle = effectiveStyle(other, changed.device)
+      if (!conflictsWithGap(style, otherStyle, changed.gap)) continue
+      const componentIsLowerDecoration = isDecorativeComponent(component, style) && style.zIndex < otherStyle.zIndex
+      const otherIsLowerDecoration = isDecorativeComponent(other, otherStyle) && otherStyle.zIndex < style.zIndex
+      if (componentIsLowerDecoration || otherIsLowerDecoration) continue
+      const suffix = changed.gap ? `或间距不足 ${changed.gap}px` : ''
+      throw new Error(`AI 修改会导致“${component.name}”与“${other.name}”重叠${suffix}，已取消本次修改。`)
+    }
+  }
+}
 
 const applyStyle = (component: ComponentData, device: DeviceType, changes: Partial<ComponentStyle>) => {
   if (device === DeviceType.DESKTOP) {
@@ -244,7 +287,12 @@ const addComponent = (page: PageData, operation: Extract<AIPageOperation, { op: 
   }
   placeAddedComponentSafely(component, page, DeviceType.DESKTOP)
   placeAddedComponentSafely(component, page, DeviceType.MOBILE)
-  page.components.push(component)
+  if (isDecorativeComponent(component, component.style)) {
+    page.components.unshift(component)
+    page.components.forEach((item, order) => { item.style.zIndex = order + 1 })
+  } else {
+    page.components.push(component)
+  }
   return component.id
 }
 
@@ -257,7 +305,10 @@ const updateProps = (page: PageData, operation: Extract<AIPageOperation, { op: '
     if (!allowed.has(key)) throw new Error(`组件“${component.name}”不支持属性“${key}”。`)
   }
   component.props = { ...clone(component.props), ...clone(operation.changes) } as ComponentData['props']
+  const changedDevices = new Set<DeviceType>()
   if (component.type === ComponentType.TEXT && 'content' in operation.changes) {
+    const previousDesktopHeight = component.style.height
+    const previousMobileHeight = effectiveStyle(component, DeviceType.MOBILE).height
     const content = (component.props as { content?: unknown }).content
     component.style.height = Math.max(
       component.style.height,
@@ -267,17 +318,20 @@ const updateProps = (page: PageData, operation: Extract<AIPageOperation, { op: '
     applyStyle(component, DeviceType.MOBILE, {
       height: Math.max(mobile.height, estimateTextHeight(content, mobile.width, mobile.fontSize, mobile.lineHeight))
     })
-    placeAddedComponentSafely(component, page, DeviceType.DESKTOP)
-    placeAddedComponentSafely(component, page, DeviceType.MOBILE)
+    if (component.style.height !== previousDesktopHeight) changedDevices.add(DeviceType.DESKTOP)
+    if (effectiveStyle(component, DeviceType.MOBILE).height !== previousMobileHeight) changedDevices.add(DeviceType.MOBILE)
   }
   if (component.type === ComponentType.FORM && 'fields' in operation.changes) {
+    const previousDesktopHeight = component.style.height
+    const previousMobileHeight = effectiveStyle(component, DeviceType.MOBILE).height
     const minimumHeight = getFormMinimumHeight(component.props)
     component.style.height = Math.max(component.style.height, minimumHeight)
     const mobile = effectiveStyle(component, DeviceType.MOBILE)
     applyStyle(component, DeviceType.MOBILE, { height: Math.max(mobile.height, minimumHeight) })
-    placeAddedComponentSafely(component, page, DeviceType.DESKTOP)
-    placeAddedComponentSafely(component, page, DeviceType.MOBILE)
+    if (component.style.height !== previousDesktopHeight) changedDevices.add(DeviceType.DESKTOP)
+    if (effectiveStyle(component, DeviceType.MOBILE).height !== previousMobileHeight) changedDevices.add(DeviceType.MOBILE)
   }
+  return [...changedDevices]
 }
 
 const moveLayer = (page: PageData, operation: Extract<AIPageOperation, { op: 'moveLayer' }>) => {
@@ -333,16 +387,21 @@ export const validateAIPagePatch = (value: unknown): AIPagePatch => {
   return value as unknown as AIPagePatch
 }
 
-export const applyAIPagePatch = (source: PageData, rawPatch: unknown) => {
+export const applyAIPagePatch = (source: PageData, rawPatch: unknown, expectedRevision: number) => {
   const patch = validateAIPagePatch(rawPatch)
+  if (patch.baseRevision !== expectedRevision) {
+    throw new Error(`AI Patch 基于 revision ${patch.baseRevision}，但当前请求基于 revision ${expectedRevision}。`)
+  }
   const page = clone(source)
-  const geometryChanges: Array<{ id: string; device: DeviceType }> = []
+  const geometryChanges: GeometryValidation[] = []
   const resizedPages = new Set<DeviceType>()
 
   for (const operation of patch.operations) {
     switch (operation.op) {
       case 'updateProps':
-        updateProps(page, operation)
+        updateProps(page, operation).forEach((device) => {
+          geometryChanges.push({ id: operation.componentId, device, gap: 16 })
+        })
         break
       case 'updateStyle': {
         const component = getComponent(page, operation.componentId)
@@ -350,7 +409,9 @@ export const applyAIPagePatch = (source: PageData, rawPatch: unknown) => {
         applyStyle(component, operation.device, changes)
         clampComponent(component, page, operation.device)
         if (['top', 'left', 'width', 'height'].some((key) => key in changes)) {
-          geometryChanges.push({ id: component.id, device: operation.device })
+          geometryChanges.push({ id: component.id, device: operation.device, gap: 16 })
+        } else if ('rotate' in changes || 'opacity' in changes) {
+          geometryChanges.push({ id: component.id, device: operation.device, gap: 0 })
         }
         break
       }
@@ -371,12 +432,12 @@ export const applyAIPagePatch = (source: PageData, rawPatch: unknown) => {
       }
       case 'placeRelative':
         placeRelative(page, operation)
-        geometryChanges.push({ id: operation.componentId, device: operation.device })
+        geometryChanges.push({ id: operation.componentId, device: operation.device, gap: 16 })
         break
       case 'addComponent': {
         const id = addComponent(page, operation)
-        geometryChanges.push({ id, device: DeviceType.DESKTOP })
-        geometryChanges.push({ id, device: DeviceType.MOBILE })
+        geometryChanges.push({ id, device: DeviceType.DESKTOP, gap: 16 })
+        geometryChanges.push({ id, device: DeviceType.MOBILE, gap: 16 })
         break
       }
       case 'removeComponent':
@@ -387,27 +448,18 @@ export const applyAIPagePatch = (source: PageData, rawPatch: unknown) => {
         break
       case 'moveLayer':
         moveLayer(page, operation)
+        geometryChanges.push(
+          { id: operation.componentId, device: DeviceType.DESKTOP, gap: 0 },
+          { id: operation.componentId, device: DeviceType.MOBILE, gap: 0 }
+        )
         break
     }
   }
 
-  resizedPages.forEach((device) => page.components.forEach((component) => clampComponent(component, page, device)))
-
-  for (const changed of geometryChanges) {
-    const component = getComponent(page, changed.id)
-    const style = effectiveStyle(component, changed.device)
-    if (isDecorativeComponent(component, style)) continue
-    for (const other of page.components) {
-      if (other.id === component.id) continue
-      const otherStyle = effectiveStyle(other, changed.device)
-      if (isDecorativeComponent(other, otherStyle)) continue
-      const overlaps = style.left < otherStyle.left + otherStyle.width
-        && style.left + style.width > otherStyle.left
-        && style.top < otherStyle.top + otherStyle.height
-        && style.top + style.height > otherStyle.top
-      if (overlaps) throw new Error(`AI 修改会导致“${component.name}”与“${other.name}”重叠，已取消本次修改。`)
-    }
-  }
+  resizedPages.forEach((device) => page.components.forEach((component) => {
+    clampComponent(component, page, device)
+    geometryChanges.push({ id: component.id, device, gap: 16 })
+  }))
 
   const mobileBottom = page.components.reduce((bottom, component) => {
     const style = effectiveStyle(component, DeviceType.MOBILE)
@@ -419,6 +471,7 @@ export const applyAIPagePatch = (source: PageData, rawPatch: unknown) => {
     width: MOBILE_WIDTH_THRESHOLD,
     height: Math.max(812, mobileBottom + MOBILE_PADDING)
   }
+  validateChangedGeometry(page, geometryChanges)
   page.meta.updatedAt = new Date().toISOString()
 
   const repaired = validateAndRepairPageData(page)

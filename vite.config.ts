@@ -4,7 +4,7 @@ import { defineConfig, loadEnv, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import vueDevTools from 'vite-plugin-vue-devtools'
 import { retrieveComponentsWithRag, type RagComponentIndexItem } from './server/componentRag'
-import { createLargeEditPlan, shouldPlanLargeEdit } from './server/largeEditPlan'
+import { createLargeEditPlan, shouldClarifyBroadLargeEdit, shouldPlanLargeEdit } from './server/largeEditPlan'
 import {
   compactStructuredValue,
   componentLocatorSchema,
@@ -967,6 +967,18 @@ const aiPageGeneratorV2 = (): Plugin => ({
             }
           : null
 
+        if (!execution && !repairContext && shouldClarifyBroadLargeEdit(message, page.components.length)) {
+          send({
+            type: 'success',
+            result: {
+              type: 'need_clarification',
+              question: '页面组件较多。请按组件类型、页面区域或一组明确文案缩小本轮修改范围，我会分批安全处理。'
+            },
+            attempts: 1
+          })
+          return res.end()
+        }
+
         if (!execution && !repairContext && shouldPlanLargeEdit(message, page.components.length)) {
           send({ type: 'progress', stage: 'planning-edit', message: '修改范围较大，正在拆分为可安全执行的步骤…' })
           const planningController = new AbortController()
@@ -1198,7 +1210,7 @@ const aiPageGeneratorV2 = (): Plugin => ({
 
 允许操作：
 - {"op":"updateProps","componentId":"稳定ID","changes":{...}}
-- {"op":"updateStyle","componentId":"稳定ID","device":"desktop|mobile","changes":{top,left,width,height,zIndex,rotate,opacity,fontSize,fontWeight,lineHeight,color,backgroundColor,borderWidth,borderColor,borderRadius,textAlign}}
+- {"op":"updateStyle","componentId":"稳定ID","device":"desktop|mobile","changes":{top,left,width,height,rotate,opacity,fontSize,fontWeight,lineHeight,color,backgroundColor,borderWidth,borderColor,borderRadius,textAlign}}
 - {"op":"updatePageStyle","device":"desktop|mobile","changes":{width,height,backgroundColor,backgroundImage}}
 - {"op":"placeRelative","componentId":"稳定ID","targetId":"稳定ID","device":"desktop|mobile","relation":"above|below|left|right","gap":16,"align":"start|center|end"}
 - {"op":"addComponent","componentType":"Text|Image|Button|Input|Form|Chart","name":"名称","props":{},"style":{"left":数字,"top":数字,"width":数字,"height":数字},"mobileStyle":{"left":数字,"top":数字,"width":数字,"height":数字}}

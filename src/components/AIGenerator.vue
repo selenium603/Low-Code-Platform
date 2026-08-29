@@ -99,6 +99,7 @@ const progressText = ref('')
 const errorMessage = ref('')
 const messagesRef = ref<HTMLElement | null>(null)
 const activeRequest = shallowRef<AbortController | null>(null)
+const pendingEditMessage = shallowRef<{ pageId: string; messageId: string } | null>(null)
 const closeConfirming = ref(false)
 let pendingCloseDecision: Promise<boolean> | null = null
 
@@ -150,6 +151,13 @@ const waitForCloseDecision = async () => {
   if (decision) await decision
 }
 
+const discardPendingEditMessage = () => {
+  const pending = pendingEditMessage.value
+  if (!pending) return
+  conversationStore.removeMessage(pending.pageId, pending.messageId)
+  pendingEditMessage.value = null
+}
+
 const generate = async (message: string, signal: AbortSignal) => {
   progressText.value = '正在启动两阶段页面生成…'
   const result = await generatePageFromPrompt(message, (progress) => { progressText.value = progress }, signal)
@@ -187,25 +195,19 @@ const edit = async (message: string, signal: AbortSignal) => {
   const requestMessages = JSON.parse(JSON.stringify(session.recentMessages))
   const requestMemory = JSON.parse(JSON.stringify(session.memory))
   const pendingMessage = conversationStore.appendMessage(page.id, baseRevision, 'user', message)
+  pendingEditMessage.value = { pageId: page.id, messageId: pendingMessage.id }
   progressText.value = '正在读取当前页面和最近对话…'
 
-  let response: Awaited<ReturnType<typeof editPageFromPrompt>>
-  try {
-    response = await editPageFromPrompt({
-      message,
-      page: JSON.parse(JSON.stringify(page)),
-      baseRevision,
-      recentMessages: requestMessages,
-      conversationMemory: requestMemory
-    }, (progress) => { progressText.value = progress }, signal)
-  } catch (error) {
-    if (isAbortError(error)) conversationStore.removeMessage(page.id, pendingMessage.id)
-    throw error
-  }
+  const response = await editPageFromPrompt({
+    message,
+    page: JSON.parse(JSON.stringify(page)),
+    baseRevision,
+    recentMessages: requestMessages,
+    conversationMemory: requestMemory
+  }, (progress) => { progressText.value = progress }, signal)
 
   await waitForCloseDecision()
   if (signal.aborted) {
-    conversationStore.removeMessage(page.id, pendingMessage.id)
     throwIfAborted(signal)
   }
 
@@ -217,6 +219,7 @@ const edit = async (message: string, signal: AbortSignal) => {
     conversationStore.appendMessage(page.id, baseRevision, 'assistant', response.result.question)
     conversationStore.rememberUserIntent(page.id, baseRevision, message)
     conversationStore.rememberOpenQuestion(page.id, baseRevision, response.result.question)
+    pendingEditMessage.value = null
     return
   }
 
@@ -240,46 +243,40 @@ const edit = async (message: string, signal: AbortSignal) => {
           throw new Error('AI 处理期间页面已发生修改。为避免覆盖手工操作，请重新发送这条要求。')
         }
         progressText.value = `正在执行大幅修改 ${index + 1}/${plan.steps.length}：${step.title}${applicationAttempt > 1 ? '（修正布局）' : ''}`
-        let stepResponse: Awaited<ReturnType<typeof editPageFromPrompt>>
-        try {
-          stepResponse = await editPageFromPrompt({
-            message: step.instruction,
-            page: JSON.parse(JSON.stringify(nextPage)),
-            baseRevision,
-            recentMessages: requestMessages,
-            conversationMemory: requestMemory,
-            execution: {
-              planId: plan.planId,
-              planSummary: plan.summary,
-              originalRequest: message,
-              stepIndex: index,
-              stepCount: plan.steps.length,
-              step,
-              ...(validationError ? { validationError } : {})
-            }
-          }, (progress) => {
-            progressText.value = `步骤 ${index + 1}/${plan.steps.length}：${progress}`
-          }, signal)
-        } catch (error) {
-          if (isAbortError(error)) conversationStore.removeMessage(page.id, pendingMessage.id)
-          throw error
-        }
+        const stepResponse = await editPageFromPrompt({
+          message: step.instruction,
+          page: JSON.parse(JSON.stringify(nextPage)),
+          baseRevision,
+          recentMessages: requestMessages,
+          conversationMemory: requestMemory,
+          execution: {
+            planId: plan.planId,
+            planSummary: plan.summary,
+            originalRequest: message,
+            stepIndex: index,
+            stepCount: plan.steps.length,
+            step,
+            ...(validationError ? { validationError } : {})
+          }
+        }, (progress) => {
+          progressText.value = `步骤 ${index + 1}/${plan.steps.length}：${progress}`
+        }, signal)
         await waitForCloseDecision()
         if (signal.aborted) {
-          conversationStore.removeMessage(page.id, pendingMessage.id)
           throwIfAborted(signal)
         }
         if (stepResponse.result.type === 'need_clarification') {
           conversationStore.appendMessage(page.id, baseRevision, 'assistant', stepResponse.result.question)
           conversationStore.rememberUserIntent(page.id, baseRevision, message)
           conversationStore.rememberOpenQuestion(page.id, baseRevision, stepResponse.result.question)
+          pendingEditMessage.value = null
           return
         }
         if (stepResponse.result.type === 'page_edit_plan') {
           throw new Error(`大幅修改第 ${index + 1} 步返回了重复计划，已取消整次修改。`)
         }
         try {
-          const appliedStep = applyAIPagePatch(nextPage, stepResponse.result)
+          const appliedStep = applyAIPagePatch(nextPage, stepResponse.result, baseRevision)
           nextPage = appliedStep.page
           operationCount += appliedStep.patch.operations.length
           allWarnings.push(...appliedStep.warnings)
@@ -302,7 +299,7 @@ const edit = async (message: string, signal: AbortSignal) => {
         ? '正在校验并事务式应用增量修改…'
         : '正在校验 AI 修正后的增量修改…'
       try {
-        const applied = applyAIPagePatch(nextPage, patch)
+        const applied = applyAIPagePatch(nextPage, patch, baseRevision)
         nextPage = applied.page
         summary = applied.patch.summary
         operationCount = applied.patch.operations.length
@@ -319,27 +316,20 @@ const edit = async (message: string, signal: AbortSignal) => {
           throw new Error('AI 处理期间页面已发生修改。为避免覆盖手工操作，请重新发送这条要求。')
         }
         progressText.value = `页面副本校验失败：${validationError} 正在要求 AI 修正 Patch…`
-        let repairResponse: Awaited<ReturnType<typeof editPageFromPrompt>>
-        try {
-          repairResponse = await editPageFromPrompt({
-            message,
-            page: JSON.parse(JSON.stringify(page)),
-            baseRevision,
-            recentMessages: requestMessages,
-            conversationMemory: requestMemory,
-            repairContext: {
-              validationError,
-              previousPatch: patch
-            }
-          }, (progress) => { progressText.value = `正在修正布局：${progress}` }, signal)
-        } catch (repairError) {
-          if (isAbortError(repairError)) conversationStore.removeMessage(page.id, pendingMessage.id)
-          throw repairError
-        }
+        const repairResponse = await editPageFromPrompt({
+          message,
+          page: JSON.parse(JSON.stringify(page)),
+          baseRevision,
+          recentMessages: requestMessages,
+          conversationMemory: requestMemory,
+          repairContext: {
+            validationError,
+            previousPatch: patch
+          }
+        }, (progress) => { progressText.value = `正在修正布局：${progress}` }, signal)
 
         await waitForCloseDecision()
         if (signal.aborted) {
-          conversationStore.removeMessage(page.id, pendingMessage.id)
           throwIfAborted(signal)
         }
         if (editorStore.pageRevision !== baseRevision) {
@@ -349,6 +339,7 @@ const edit = async (message: string, signal: AbortSignal) => {
           conversationStore.appendMessage(page.id, baseRevision, 'assistant', repairResponse.result.question)
           conversationStore.rememberUserIntent(page.id, baseRevision, message)
           conversationStore.rememberOpenQuestion(page.id, baseRevision, repairResponse.result.question)
+          pendingEditMessage.value = null
           return
         }
         if (repairResponse.result.type === 'page_edit_plan') {
@@ -377,6 +368,7 @@ const edit = async (message: string, signal: AbortSignal) => {
   )
   conversationStore.rememberUserIntent(page.id, nextRevision, message)
   conversationStore.rememberCompletedChange(page.id, nextRevision, summary)
+  pendingEditMessage.value = null
   ElMessage.success(`AI 增量修改完成：${summary}`)
 }
 
@@ -398,6 +390,7 @@ const submit = async () => {
     throwIfAborted(controller.signal)
     prompt.value = ''
   } catch (error) {
+    discardPendingEditMessage()
     if (isAbortError(error)) {
       errorMessage.value = ''
       ElMessage.info('已取消本次 AI 请求')

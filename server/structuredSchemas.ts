@@ -144,7 +144,7 @@ const nullablePartialProps = (componentType: string) => object(Object.fromEntrie
 ))
 
 const nullableStyleChanges = object(Object.fromEntries(
-  Object.entries(styleProperties).map(([key, schema]) => {
+  Object.entries(styleProperties).filter(([key]) => key !== 'zIndex').map(([key, schema]) => {
     const candidate = schema as JsonSchema
     return [key, 'anyOf' in candidate ? candidate : nullable(candidate)]
   })
