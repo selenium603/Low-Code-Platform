@@ -16,11 +16,14 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "@langchain/core": "^1.2.9",
+    "@langchain/langgraph": "^1.4.13",
     "echarts": "^6.1.0",
     "element-plus": "^2.13.6",
     "pinia": "^3.0.4",
     "vue": "^3.5.30",
-    "vue-router": "^5.0.3"
+    "vue-router": "^5.0.3",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@tsconfig/node24": "^24.0.4",

@@ -46,16 +46,10 @@ const requestedComponentTarget = (request: string) => [...request.matchAll(
 
 export const shouldPlanLargeEdit = (request: string, componentCount: number) => {
   if ((requestedComponentTarget(request) || 0) >= 13) return true
+  if (/(?:新增|添加|创建|扩充).{0,10}(?:十几|十多|二十|三十|几十|大量|一批|一系列)(?:个)?(?:组件|模块|卡片|元素|区域)/i.test(request)) return true
   if (/(大幅|大改|大规模|复杂一点|更复杂|丰富.{0,6}(页面|内容)|重新设计|整体重构|整页重构|批量新增|多个(?:区域|模块|分区))/i.test(request)) return true
   return componentCount > 12 && /(全部|所有|整页|全局).{0,12}(修改|调整|替换|重排|统一)/i.test(request)
 }
-
-/** 40+ 组件的宽泛整页修改无法由有限 RAG 窗口证明完整覆盖，应先要求缩小范围。 */
-export const shouldClarifyBroadLargeEdit = (request: string, componentCount: number) => (
-  componentCount > 40
-  && /(全部|所有|整页|全局|整体重构|整页重构|重新设计)/i.test(request)
-  && !/(新增|添加|创建|扩充|增加|达到|最终.{0,8}\d+)/i.test(request)
-)
 
 const parsePlan = (value: unknown): Omit<LargeEditPlan, 'planId'> | LargeEditClarification | null => {
   if (!isRecord(value)) return null

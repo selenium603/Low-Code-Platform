@@ -1,5 +1,5 @@
-import type { ComponentProps, ComponentStyle, PageData, PageStyle } from '@/types'
-import type { ComponentType, DeviceType } from '@/types'
+import type { ComponentProps, ComponentStyle, PageData, PageStyle } from './index'
+import type { ComponentType, DeviceType } from './index'
 
 export type AIConversationRole = 'user' | 'assistant'
 
@@ -101,22 +101,18 @@ export interface AIPageEditPlan {
   steps: AIPageEditPlanStep[]
 }
 
-export interface AIEditExecutionContext {
-  planId: string
-  planSummary: string
-  originalRequest: string
-  stepIndex: number
+export interface AIPageEditCompleted {
+  type: 'page_edit_completed'
+  runId: string
+  baseRevision: number
+  summary: string
+  page: PageData
+  operationCount: number
   stepCount: number
-  step: AIPageEditPlanStep
-  validationError?: string
+  warnings: string[]
 }
 
-export interface AIEditRepairContext {
-  validationError: string
-  previousPatch: AIPagePatch
-}
-
-export type AIEditResponse = AIPagePatch | AIClarification | AIPageEditPlan
+export type AIEditResponse = AIPagePatch | AIClarification | AIPageEditPlan | AIPageEditCompleted
 
 export interface AIEditRequest {
   message: string
@@ -124,6 +120,4 @@ export interface AIEditRequest {
   baseRevision: number
   recentMessages: AIConversationMessage[]
   conversationMemory: AIConversationMemory
-  execution?: AIEditExecutionContext
-  repairContext?: AIEditRepairContext
 }

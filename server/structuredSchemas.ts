@@ -292,6 +292,18 @@ export const componentLocatorSchema: JsonSchema = object({
   question: nullable(string)
 })
 
+export const contextIntentSchema: JsonSchema = object({
+  label: enumString(['local_edit', 'large_edit', 'full_relayout', 'question', 'need_clarification']),
+  reason: { type: 'string', minLength: 1, maxLength: 300 },
+  clarificationQuestion: nullable({ type: 'string', minLength: 1, maxLength: 500 })
+})
+
+export const toolRouteSchema: JsonSchema = object({
+  tool: enumString(['local_edit', 'large_edit', 'full_relayout', 'ask_clarification']),
+  reason: { type: 'string', minLength: 1, maxLength: 300 },
+  clarificationQuestion: nullable({ type: 'string', minLength: 1, maxLength: 500 })
+})
+
 export const largeEditResponseSchema: JsonSchema = object({
   type: enumString(['page_edit_plan', 'need_clarification']),
   summary: nullable(string),

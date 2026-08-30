@@ -19,7 +19,7 @@
     <p class="hint">
       {{ mode === 'generate'
         ? '描述页面结构、内容和风格，AI 会生成可继续编辑的完整页面。'
-        : '直接描述要修改的内容。AI 只返回增量操作，并保留你已经完成的其他编辑。' }}
+        : '直接描述要修改的内容。服务端会在页面副本中完成并校验修改，只在全部成功后返回最终页面。' }}
     </p>
 
     <div ref="messagesRef" class="messages" :class="{ empty: messages.length === 0 }">
@@ -85,7 +85,6 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 import { generatePageFromPrompt } from '@/services/aiPage'
 import { editPageFromPrompt } from '@/services/aiEditPage'
-import { applyAIPagePatch } from '@/services/pagePatchExecutor'
 import { useEditorStore } from '@/stores/editor'
 import { useHistoryStore } from '@/stores/history'
 import { useAIConversationStore } from '@/stores/aiConversation'
@@ -223,136 +222,23 @@ const edit = async (message: string, signal: AbortSignal) => {
     return
   }
 
-  let nextPage = JSON.parse(JSON.stringify(page)) as typeof page
-  let summary = ''
-  let operationCount = 0
-  let stepCount = 1
-  const allWarnings: string[] = []
-
-  if (response.result.type === 'page_edit_plan') {
-    const plan = response.result
-    stepCount = plan.steps.length
-    for (let index = 0; index < plan.steps.length; index += 1) {
-      const step = plan.steps[index]
-      if (!step) continue
-      let validationError = ''
-      let stepApplied = false
-      for (let applicationAttempt = 1; applicationAttempt <= 2; applicationAttempt += 1) {
-        throwIfAborted(signal)
-        if (editorStore.pageRevision !== baseRevision) {
-          throw new Error('AI 处理期间页面已发生修改。为避免覆盖手工操作，请重新发送这条要求。')
-        }
-        progressText.value = `正在执行大幅修改 ${index + 1}/${plan.steps.length}：${step.title}${applicationAttempt > 1 ? '（修正布局）' : ''}`
-        const stepResponse = await editPageFromPrompt({
-          message: step.instruction,
-          page: JSON.parse(JSON.stringify(nextPage)),
-          baseRevision,
-          recentMessages: requestMessages,
-          conversationMemory: requestMemory,
-          execution: {
-            planId: plan.planId,
-            planSummary: plan.summary,
-            originalRequest: message,
-            stepIndex: index,
-            stepCount: plan.steps.length,
-            step,
-            ...(validationError ? { validationError } : {})
-          }
-        }, (progress) => {
-          progressText.value = `步骤 ${index + 1}/${plan.steps.length}：${progress}`
-        }, signal)
-        await waitForCloseDecision()
-        if (signal.aborted) {
-          throwIfAborted(signal)
-        }
-        if (stepResponse.result.type === 'need_clarification') {
-          conversationStore.appendMessage(page.id, baseRevision, 'assistant', stepResponse.result.question)
-          conversationStore.rememberUserIntent(page.id, baseRevision, message)
-          conversationStore.rememberOpenQuestion(page.id, baseRevision, stepResponse.result.question)
-          pendingEditMessage.value = null
-          return
-        }
-        if (stepResponse.result.type === 'page_edit_plan') {
-          throw new Error(`大幅修改第 ${index + 1} 步返回了重复计划，已取消整次修改。`)
-        }
-        try {
-          const appliedStep = applyAIPagePatch(nextPage, stepResponse.result, baseRevision)
-          nextPage = appliedStep.page
-          operationCount += appliedStep.patch.operations.length
-          allWarnings.push(...appliedStep.warnings)
-          stepApplied = true
-          break
-        } catch (error) {
-          validationError = error instanceof Error ? error.message : '页面副本校验失败'
-          if (applicationAttempt === 2) {
-            throw new Error(`大幅修改第 ${index + 1}/${plan.steps.length} 步“${step.title}”连续两次校验失败：${validationError}。真实页面未发生变化。`)
-          }
-        }
-      }
-      if (!stepApplied) throw new Error(`大幅修改第 ${index + 1} 步未能安全应用，真实页面未发生变化。`)
-    }
-    summary = plan.summary
-  } else {
-    let patch = response.result
-    for (let applicationAttempt = 1; applicationAttempt <= 2; applicationAttempt += 1) {
-      progressText.value = applicationAttempt === 1
-        ? '正在校验并事务式应用增量修改…'
-        : '正在校验 AI 修正后的增量修改…'
-      try {
-        const applied = applyAIPagePatch(nextPage, patch, baseRevision)
-        nextPage = applied.page
-        summary = applied.patch.summary
-        operationCount = applied.patch.operations.length
-        allWarnings.push(...applied.warnings)
-        break
-      } catch (error) {
-        const validationError = error instanceof Error ? error.message : '页面副本校验失败'
-        if (applicationAttempt === 2) {
-          throw new Error(`AI 修改连续两次校验失败：${validationError}。真实页面未发生变化。`)
-        }
-
-        throwIfAborted(signal)
-        if (editorStore.pageRevision !== baseRevision) {
-          throw new Error('AI 处理期间页面已发生修改。为避免覆盖手工操作，请重新发送这条要求。')
-        }
-        progressText.value = `页面副本校验失败：${validationError} 正在要求 AI 修正 Patch…`
-        const repairResponse = await editPageFromPrompt({
-          message,
-          page: JSON.parse(JSON.stringify(page)),
-          baseRevision,
-          recentMessages: requestMessages,
-          conversationMemory: requestMemory,
-          repairContext: {
-            validationError,
-            previousPatch: patch
-          }
-        }, (progress) => { progressText.value = `正在修正布局：${progress}` }, signal)
-
-        await waitForCloseDecision()
-        if (signal.aborted) {
-          throwIfAborted(signal)
-        }
-        if (editorStore.pageRevision !== baseRevision) {
-          throw new Error('AI 处理期间页面已发生修改。为避免覆盖手工操作，请重新发送这条要求。')
-        }
-        if (repairResponse.result.type === 'need_clarification') {
-          conversationStore.appendMessage(page.id, baseRevision, 'assistant', repairResponse.result.question)
-          conversationStore.rememberUserIntent(page.id, baseRevision, message)
-          conversationStore.rememberOpenQuestion(page.id, baseRevision, repairResponse.result.question)
-          pendingEditMessage.value = null
-          return
-        }
-        if (repairResponse.result.type === 'page_edit_plan') {
-          throw new Error('AI 修正请求返回了新的大改计划，已取消本次修改。')
-        }
-        patch = repairResponse.result
-      }
-    }
+  if (response.result.type !== 'page_edit_completed') {
+    throw new Error('AI 编辑服务未返回可提交的最终页面，请重试。')
   }
+  if (response.result.baseRevision !== baseRevision) {
+    throw new Error('AI 返回结果基于过期的页面 revision，请重新发送这条要求。')
+  }
+
+  const nextPage = JSON.parse(JSON.stringify(response.result.page)) as typeof page
+  const summary = response.result.summary
+  const operationCount = response.result.operationCount
+  const stepCount = response.result.stepCount
+  const allWarnings = response.result.warnings
 
   if (editorStore.pageRevision !== baseRevision) {
     throw new Error('AI 处理期间页面已发生修改。为避免覆盖手工操作，请重新发送这条要求。')
   }
+
   progressText.value = stepCount > 1 ? '所有步骤已通过校验，正在一次性提交页面…' : '正在提交修改…'
   editorStore.applyAIPagePatchTransaction(nextPage, summary, baseRevision)
   editorStore.persistPage()
@@ -364,12 +250,12 @@ const edit = async (message: string, signal: AbortSignal) => {
     `已完成：${summary}`,
     allWarnings.length
       ? `分 ${stepCount} 步执行 ${operationCount} 个操作，并安全修复 ${allWarnings.length} 项数据；已作为一条命令提交。`
-      : `分 ${stepCount} 步执行 ${operationCount} 个增量操作，已作为一条命令提交，可通过顶部撤销恢复。`
+      : `分 ${stepCount} 步完成 ${operationCount} 项修改，已作为一条命令提交，可通过顶部撤销恢复。`
   )
   conversationStore.rememberUserIntent(page.id, nextRevision, message)
   conversationStore.rememberCompletedChange(page.id, nextRevision, summary)
   pendingEditMessage.value = null
-  ElMessage.success(`AI 增量修改完成：${summary}`)
+  ElMessage.success(`AI 页面修改完成：${summary}`)
 }
 
 const submit = async () => {
@@ -449,7 +335,7 @@ const clearConversation = () => {
   const page = currentPage.value
   if (!page) return
   conversationStore.clearSession(page.id, editorStore.pageRevision)
-  ElMessage.success('当前页面的 AI 对话已清空')
+  ElMessage.success('聊天记录已清空')
 }
 
 const undoLastAIChange = () => {

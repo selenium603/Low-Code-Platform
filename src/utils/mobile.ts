@@ -1,4 +1,4 @@
-import type { ComponentStyle } from '@/types'
+import type { ComponentStyle } from '../types'
 
 export const MOBILE_DEFAULT_MIN_HEIGHT = 120
 export const MOBILE_WIDTH_THRESHOLD = 375

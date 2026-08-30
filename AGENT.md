@@ -211,12 +211,12 @@ ComponentData
 ```text
 用户继续提出修改
 → 发送当前 Page Schema + 最近 6 条消息 + 结构化记忆 + baseRevision
-→ AI 通过 strict Structured Output 只返回领域化 Patch 或澄清问题
+→ LangGraph 按局部修改、大幅修改、整页重构或问题请求分流
 → compact nullable 可选字段
-→ 服务端校验操作白名单与稳定组件 ID
-→ 前端在页面副本中执行并复用导入校验
-→ 检查请求期间 revision 是否变化
-→ 全部通过后作为一条历史命令提交
+→ 服务端通过 strict Structured Output 生成领域 Patch，并校验白名单与稳定组件 ID
+→ Graph 在页面副本中执行、修复并完成相应层级的几何校验
+→ SSE 只返回澄清问题或 page_edit_completed 最终页面
+→ 前端检查请求期间 revision，随后作为一条历史命令提交
 → 可通过一次 undo 完整恢复
 ```
 
@@ -405,17 +405,17 @@ strict JSON Schema 结构约束
 - `removeComponent`
 - `moveLayer`
 
-模型无权修改组件 ID。增量 Patch 的 strict Schema 会按本轮页面动态构建：`updateProps` 按目标组件的真实类型约束属性，`componentId/targetId` 使用当前允许稳定 ID 的枚举，并收紧 `baseRevision`、操作白名单和数量上限；随后 `validateAIEditResult` 再复核目标 ID 与字段语义。`placeRelative` 只描述“上方/下方/左侧/右侧”等关系，具体坐标由应用计算。目标存在歧义时，接口返回 `need_clarification`，不能猜测修改对象。
+模型无权修改组件 ID。增量 Patch 的 strict Schema 会按本轮页面动态构建：`updateProps` 按目标组件的真实类型约束属性，`componentId/targetId` 使用当前允许稳定 ID 的枚举，并收紧 `baseRevision`、操作白名单和数量上限；随后 `validateGeneratedEditResponse` 再复核目标 ID 与字段语义。`placeRelative` 只描述“上方/下方/左侧/右侧”等关系，具体坐标由应用计算。目标存在歧义时，接口返回 `need_clarification`，不能猜测修改对象。
 
-编辑器维护单调递增的 `pageRevision`。AI 请求返回时若 revision 已变化，说明用户在等待期间进行了手工编辑，本次 Patch 会被拒绝，避免覆盖新操作。一次 Patch 在页面副本上完整执行；普通增量修改若因边界、重叠等应用校验失败，会携带失败 Patch 和精确错误自动请求一次修正版，第二次仍失败才向用户报错。通过后由 `applyAIPagePatchTransaction` 作为一条命令进入历史栈。
+编辑器维护单调递增的 `pageRevision`。AI 请求返回时若 revision 已变化，说明用户在等待期间进行了手工编辑，本次最终页面会被拒绝，避免覆盖新操作。Patch 在服务端页面副本上执行；普通修改若因边界、重叠等应用校验失败，会携带失败 Patch 和精确错误自动请求一次修正版，第二次仍失败才向用户报错。全部通过后，前端通过 `applyAIPagePatchTransaction` 将最终页面作为一条命令写入历史栈。
 
-增量样式 Patch 不再接受 `zIndex`，层级调整统一使用 `moveLayer`，避免最终按数组顺序重编号时静默覆盖模型修改。几何修改统一检查页面边界、内容组件 16px 间距以及装饰图片必须位于被覆盖内容下层；Text 文案或 Form 字段增长只负责补足高度，不再自动把组件搬到任意空位，发生冲突时交给已有修复 Patch 显式调整。客户端执行器也会复核 Patch 的 `baseRevision`，失败或取消的用户消息不会残留在下一轮模型上下文中。
+增量样式 Patch 不再接受 `zIndex`，层级调整统一使用 `moveLayer`，避免最终按数组顺序重编号时静默覆盖模型修改。几何修改检查页面边界、内容组件 16px 间距以及装饰图片必须位于被覆盖内容下层；Text 文案或 Form 字段增长只负责补足高度，发生冲突时交给修复 Patch 显式调整。服务端执行器复核 Patch 的 `baseRevision`，前端还会复核最终页面的 revision；失败或取消的用户消息不会残留在下一轮模型上下文中。
 
 ### 大幅修改的 P0/P1 分阶段事务
 
-`server/largeEditPlan.ts` 会识别“40+ 组件”“大幅修改”“整体重构”等高操作量要求，先让规划模型返回 2～6 个可独立执行的步骤，再由应用侧规范化步骤范围、操作预算和目标新增数量。单步最多 8 个操作，新增大量组件时先扩展 PC/手机页面高度，避免一次响应过长导致 JSON 截断。
+`server/ai/graph/pageEditAgent.ts` 统一识别局部修改、大幅修改、整页重构和非修改问题。大幅修改由规划模型返回 2～6 个步骤，单步最多 8 个操作；新增大量组件时先扩展 PC/手机页面高度。
 
-`AIGenerator.vue` 不会把中间步骤直接写入真实页面，而是克隆当前 `PageData`，依次在副本上执行 Patch。单步若因边界、重叠等应用校验失败，会把精确错误反馈给模型重试一次；任一步仍失败、请求取消或 revision 冲突时丢弃整个副本，真实页面保持不变。全部步骤成功后才通过 `applyAIPagePatchTransaction` 一次提交，因此整轮大改只产生一个 revision 和一条撤销记录。
+页面副本、Patch 应用和一次修复均由服务端 Graph 管理。任一步失败、请求取消或最终几何校验失败时不返回页面；全部成功后 SSE 只返回一次 `page_edit_completed`。`AIGenerator.vue` 校验 revision 后通过 `applyAIPagePatchTransaction` 一次提交，因此整轮修改只产生一个 revision 和一条撤销记录。
 
 执行阶段会按 `operationBudget` 动态分配 `max_tokens`，显式识别上游 `finish_reason: length`；JSON 语法错误会转换成“缩短输出并返回完整 JSON”的内部重试提示，不再把 `Expected ',' ... at position ...` 直接暴露给用户。`addComponent` 同时支持 `style` 和 `mobileStyle`，应用侧会分别检查双端边界与安全间距，并在必要时寻找最近空位或增长页面高度。
 
@@ -429,11 +429,11 @@ strict JSON Schema 结构约束
 4. 第一轮定位模型只从 RAG 候选中选择最多 12 个目标 ID，歧义或范围过大时返回澄清问题；
 5. `selectLocalPageComponents` 根据目标 ID 补充数组邻居和桌面空间近邻，最多加载 16 个组件的完整 Schema；
 6. 第二轮模型只接收页面外壳、目标组件和局部邻居，并生成领域 Patch；
-7. `validateAIEditResult` 会限制 Patch 只能修改定位阶段选中的稳定 ID，RAG 相关度不能绕过 Patch 白名单和稳定 ID 校验。
+7. `validateGeneratedEditResponse` 会限制 Patch 只能修改定位阶段选中的稳定 ID，RAG 相关度不能绕过 Patch 白名单和稳定 ID 校验。
 
 组件文档向量在 Vite/BFF 进程内按“模型 + 文档内容”缓存 15 分钟，最多 1024 条；页面只修改少量组件时仅重新计算变化文档，查询向量每轮重新计算。Embedding 失败、未配置或显式关闭时，会自动降级为本地关键词重排 + 空间邻居扩展，随后仍经过同一个定位模型，避免大页面编辑完全不可用。
 
-对于 40+ 组件页面中“全部、整页、全局重构”等无法由有限 RAG 窗口证明完整覆盖的宽泛修改，接口会先要求用户按组件类型、页面区域或明确文案缩小范围，不再把非确定性的多步召回误报为整页完成。明确的批量新增目标仍可进入分阶段事务，数量识别统一支持“组件、模块、卡片、元素”。
+对于“全部、整页、全局重构”等明确整页请求，不使用有限 RAG 窗口证明覆盖，而是按 `top → left → id` 确定性枚举全部组件并按预算连续分组。删除权限由规划模型明确决定；全部分组完成后执行桌面与手机端整页碰撞和边界校验。
 
 前端到本地 Vite 中间件的 HTTP 请求仍携带完整页面，以便服务端做 ID、revision 和最终 Patch 校验；被压缩的是发给模型的上下文。迁移到生产 BFF 后可进一步把页面 Schema 存在服务端，前端只传 `pageId + revision + message`。
 

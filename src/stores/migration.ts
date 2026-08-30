@@ -1,4 +1,4 @@
-import type { ComponentData, PageData } from '@/types'
+import type { ComponentData, PageData } from '../types'
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 

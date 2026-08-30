@@ -45,14 +45,14 @@
 
 ### AI 页面助手
 
-- **自然语言生成与修改**：生成可继续拖拽编辑的页面 Schema，并通过稳定组件 ID 的增量 Patch 修改现有页面
+- **自然语言生成与修改**：生成可继续拖拽编辑的页面 Schema；修改请求由 LangGraph Agent 分流并在服务端完成
 - **严格结构化输出**：整页生成、布局规划、RAG 定位和增量修改统一采用 strict Structured Output（JSON Schema），nullable 可选字段压缩后再进入应用校验；该链路不使用 Function Calling
 - **多轮上下文**：按页面保存最近对话与结构化记忆，区分用户目标、设计约束、已完成修改和未决问题
 - **大页面 RAG**：40+ 组件时按名称、文案、类型及 PC/手机空间关系进行组件向量召回，再加载局部 Schema 生成 Patch
-- **大幅修改分阶段执行**：把复杂整页修改规划为 2～6 个小 Patch，逐步应用到页面副本，全部成功后才以一条历史命令提交
+- **大幅修改分阶段执行**：把复杂修改规划为 2～6 个步骤；整页重构按 `top → left → id` 确定性枚举并按预算连续分组
 - **截断与格式容错**：按步骤操作量动态分配输出 token，识别 `finish_reason=length` 与不完整 JSON，携带明确错误自动重试
 - **应用失败自动修正**：普通 Patch 在页面副本中出现边界或重叠错误时，自动携带失败 Patch 和精确错误请求一次修正版，连续失败才中止且不污染真实页面
-- **安全应用**：strict 结构约束之后继续执行 revision 冲突检测、操作白名单与 Schema/布局语义校验；Patch 先应用到页面副本，全部通过后才以单条历史命令事务提交，支持撤销整轮 AI 修改
+- **安全应用**：服务端执行 revision、操作白名单、局部几何和最终整页几何校验，只通过 SSE 返回最终页面；前端以单条历史命令提交，支持一次撤销整轮修改
 
 ## 技术栈
 
@@ -77,7 +77,7 @@ src/
 │   ├── PropertyPanel.vue       # 右侧属性面板（样式 + 属性 + 事件配置）
 │   ├── PageRenderer.vue        # 页面渲染器（PC / 移动端差异化渲染）
 │   └── components/
-│       ├── registry.ts         # 组件注册表（协议定义 + 渲染器映射）
+│       ├── registry.ts         # Vue 组件渲染器映射
 │       ├── TextComponent.vue
 │       ├── ImageComponent.vue
 │       ├── ButtonComponent.vue
@@ -88,7 +88,7 @@ src/
 │   ├── editor.ts               # 编辑器核心 store（组件操作 + 样式提交 + 设备管理）
 │   ├── history.ts              # 撤销/重做历史栈（命令模式）
 │   ├── migration.ts            # 数据版本迁移（schema 2026.01 → 2026.04）
-│   └── pageImport.ts           # JSON 导入校验与自动修复
+│   └── pageImport.ts           # 兼容导出领域层 JSON 校验能力
 ├── types/
 │   └── index.ts                # 全局类型定义
 ├── utils/
@@ -99,6 +99,11 @@ src/
 ├── assets/
 ├── App.vue
 └── main.ts
+server/ai/
+├── graph/                      # LangGraph 状态、分流及局部/大幅/整页执行图
+├── context/                    # 组件索引、RAG 上下文与确定性整页分组
+├── model/                      # OpenRouter 结构化输出客户端
+└── http/                       # SSE 与编辑接口 handler
 ```
 
 ## 快速开始
