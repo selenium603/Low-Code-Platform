@@ -48,7 +48,7 @@
 - **自然语言生成与修改**：生成可继续拖拽编辑的页面 Schema；修改请求由 LangGraph Agent 分流并在服务端完成
 - **严格结构化输出**：整页生成、布局规划、RAG 定位和增量修改统一采用 strict Structured Output（JSON Schema），nullable 可选字段压缩后再进入应用校验；该链路不使用 Function Calling
 - **多轮上下文**：按页面保存最近对话与结构化记忆，区分用户目标、设计约束、已完成修改和未决问题
-- **大页面 RAG**：40+ 组件时按名称、文案、类型及 PC/手机空间关系进行组件向量召回，再加载局部 Schema 生成 Patch
+- **局部上下文检索**：按稳定 ID、名称、文案、类型及 PC/手机空间关系定位目标，再加载目标与附近组件组成的局部 Schema（最多 16 个组件）生成 Patch
 - **大幅修改分阶段执行**：把复杂修改规划为 2～6 个步骤；整页重构按 `top → left → id` 确定性枚举并按预算连续分组
 - **截断与格式容错**：按步骤操作量动态分配输出 token，识别 `finish_reason=length` 与不完整 JSON，携带明确错误自动重试
 - **应用失败自动修正**：普通 Patch 在页面副本中出现边界或重叠错误时，自动携带失败 Patch 和精确错误请求一次修正版，连续失败才中止且不污染真实页面
@@ -63,7 +63,9 @@
 | 状态管理 | Pinia 3 |
 | UI 组件库 | Element Plus 2 |
 | 图表 | ECharts 6 |
+| AI 编排 | LangGraph 1 + Zod 4 |
 | 构建工具 | Vite 7 |
+| 测试 | Vitest 4 |
 | 代码规范 | ESLint + Prettier + oxlint |
 
 ## 项目结构
@@ -87,7 +89,7 @@ src/
 ├── stores/
 │   ├── editor.ts               # 编辑器核心 store（组件操作 + 样式提交 + 设备管理）
 │   ├── history.ts              # 撤销/重做历史栈（命令模式）
-│   ├── migration.ts            # 数据版本迁移（schema 2026.01 → 2026.04）
+│   ├── migration.ts            # 数据版本迁移（schema 2026.01 → 2026.05）
 │   └── pageImport.ts           # 兼容导出领域层 JSON 校验能力
 ├── types/
 │   └── index.ts                # 全局类型定义
@@ -100,7 +102,7 @@ src/
 ├── App.vue
 └── main.ts
 server/ai/
-├── graph/                      # LangGraph 状态、分流及局部/大幅/整页执行图
+├── graph/                      # LangGraph 路由、动作作用域、授权、执行单元与 Patch 执行图
 ├── context/                    # 组件索引、RAG 上下文与确定性整页分组
 ├── model/                      # OpenRouter 结构化输出客户端
 └── http/                       # SSE 与编辑接口 handler
@@ -123,6 +125,9 @@ npm run dev
 
 # 类型检查
 npm run type-check
+
+# 单元测试
+npm run test:unit
 
 # 生产构建
 npm run build
@@ -174,7 +179,22 @@ npm run preview
 
 ### 数据版本迁移
 
-`migration.ts` 维护 schema 版本链（当前 `2026.04`），支持页面级和组件级迁移函数注册。导入旧版本 JSON 时自动逐版本升级，保证向后兼容。
+`migration.ts` 维护 schema 版本链（当前 `2026.05`），支持页面级和组件级迁移函数注册。导入旧版本 JSON 时自动逐版本升级，保证向后兼容。
+
+### AI 增量编辑状态机
+
+增量修改不是让模型重写整页，而是先把用户请求路由为局部修改、大幅修改、整页重排或问答，再生成受当前页面和授权范围约束的 Patch：
+
+- 组合要求通过结构化语义分析拆成 `add / update / replace / delete / preserve` 动作
+- 模型只能引用当前页面真实存在且已授权的稳定组件 ID
+- 删除需要用户明确授权；目标歧义和区域联动重排由统一澄清 Broker 处理，每个任务最多澄清一次
+- 大幅修改按动作拆分为 Execution Units；整页重排按桌面空间顺序确定性分组
+- 每个 Patch 在页面副本中执行，并经过字段白名单、revision、边界、碰撞和有效变化校验
+- 最终页面以单条历史命令提交，任一执行单元失败都不会污染真实画布
+
+### 测试
+
+Vitest 测试覆盖 AI 意图路由、组合动作分析、Execution Units、澄清恢复、pending task 签名校验、Patch 几何闭包和会话迁移。画布拖拽、属性面板、HTML 导出等浏览器交互目前仍以类型检查和人工回归为主。
 
 ### 响应式样式模型
 

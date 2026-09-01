@@ -13,7 +13,7 @@
 根目录：`C:\Users\carol\Desktop\vue-yuan-drag-main\vue-yuan-drag-main`
 
 ```bash
-npm install / npm run dev / npm run type-check / npm run build
+npm install / npm run dev / npm run type-check / npm run test:unit / npm run build
 ```
 
 修改 `vite.config.ts`（AI 中间件）后需重启 dev server；普通 src 文件 HMR 生效。
@@ -37,7 +37,7 @@ npm install / npm run dev / npm run type-check / npm run build
 - `src/types/index.ts`：PageData、ComponentData、Style、Props 等核心类型
 - `src/stores/editor.ts`：当前页面/选中组件/设备/画布操作；localStorage key `marketing-editor-page`
 - `src/stores/history.ts`：命令模式 undo/redo，最大 100 步，新命令清空 redo
-- `src/stores/aiConversation.ts`：按 pageId 保存会话；最近 8 条消息 + 结构化记忆（用户目标/设计约束/已完成修改/未决问题）
+- `src/stores/aiConversation.ts`：按 pageId 保存会话；本地最多保留最近 30 条消息，调用编辑接口时发送最近 6 条已完成消息，并维护结构化记忆（用户目标/设计约束/已完成修改/未决问题）
 - `src/stores/migration.ts`：Schema 迁移链，`SCHEMA_VERSION = '2026.05'`
 - `src/utils/`：`chartOption.ts`（ECharts Option 唯一构建入口，编辑器/预览/HTML 导出共用）、`mobile.ts`（响应式常量与样式合并）、`textLayout.ts`（Text 最小高度估算）、`formLayout.ts`（Form 最小高度）
 
@@ -45,9 +45,10 @@ npm install / npm run dev / npm run type-check / npm run build
 
 - `vite.config.ts`：注册 `aiPageGeneratorV2()`，提供 `POST /api/ai/generate-page`（两阶段生成 + SSE + 规范化校验 + 最多重试 3 次）与 `/api/ai/edit-page`
 - `server/structuredSchemas.ts`：集中维护全部 strict JSON Schema（页面、布局计划、编辑响应、RAG 定位）；`strictResponseFormat`、`compactStructuredValue`（移除值为 null 的可选字段）
-- `server/ai/graph/`：LangGraph 编辑 Agent —— `pageEditAgent.ts`（意图分流：局部/大幅/整页/提问）、`intentRouter.ts`、`localEditGraph.ts`、`largeEditGraph.ts`、`fullRelayoutGraph.ts`、`modelIntentRouter.ts`、`patchPolicy.ts`、`pageEditState.ts`、`pageChange.ts`
+- `server/ai/graph/`：LangGraph 编辑 Agent —— `pageEditAgent.ts`（规则/模型意图路由与总编排）、`editSemanticAnalysis.ts`（组合动作拆分）、`executionPolicy.ts`（删除与区域重排授权）、`executionUnits.ts`（局部/大幅/整页执行单元）、`unitExecutorGraph.ts`（Patch 生成、执行、重试和最终校验）、`clarificationBroker.ts`（单次澄清与安全回退）、`pendingTaskIntegrity.ts`（未决任务 HMAC 完整性）、`patchPolicy.ts`、`pageEditState.ts`
 - `server/ai/context/`：`componentIndex.ts`（`buildAIComponentIndex`/`selectLocalPageComponents`）、`fullRelayoutGroups.ts`（整页重构分组）
-- `server/largeEditPlan.ts`：大幅修改规划
+- `server/ai/model/openRouterClient.ts`：OpenRouter strict Structured Output 客户端，统一超时、取消、截断和错误分类
+- `server/ai/http/editPageHandler.ts`：编辑请求校验、pending task 验签、SSE 输出与运行日志
 - 前端入口：`src/services/aiPage.ts`、`src/services/aiEditPage.ts`
 
 ## 4. Page Schema 与组件模型
@@ -83,7 +84,7 @@ ComponentData: id / type / name / style / props / events / schemaVersion / respo
 - 重叠规则：普通内容严格 16px 间距；低层级 / 旋转 / 命名含背景装饰的 Image 允许受控重叠
 - 增量 Patch Schema 每轮动态构建：`updateProps` 按目标组件真实类型约束属性，`componentId/targetId` 用当前允许 ID 枚举；`placeRelative` 只给方向、坐标应用计算；目标歧义返回 `need_clarification`，不猜测
 - revision 检查：等待期间用户手工修改过则拒绝本次结果；Patch 均在页面副本执行，普通几何失败自动携带失败 Patch 请求一次修正版
-- 大页面（>40 组件）：RAG 定位 + 局部上下文（≤16 组件完整 Schema）；明确整页重构按 `top→left→id` 确定性枚举分组
+- 局部修改先按稳定 ID、名称、文案、类型和空间信息定位目标，再加载目标、数组相邻项和空间近邻组成的局部上下文（最多 16 个组件）；明确整页重构按 `top→left→id` 确定性枚举分组
 - 取消链路：前端 AbortController 取消 fetch，中间件监听 `res close` 中断上游模型请求；取消/失败不写记忆、revision、历史栈
 
 ## 8. 安全与部署
@@ -98,7 +99,8 @@ ComponentData: id / type / name / style / props / events / schemaVersion / respo
 - 手机端非任意宽度连续响应式；390/414 等宽屏按最大 375px 居中
 - 组件为扁平数组，无嵌套容器/组件树
 - props 为静态数据，无真实 API/数据库绑定
-- 无自动化测试体系；主包约 2.35MB（ECharts/Element Plus），建议按需分包
+- 已有 Vitest 单元测试覆盖 AI 路由、语义动作、Execution Units、澄清状态机、pending task 完整性、几何冲突闭包与会话迁移；编辑器拖拽、属性面板、导入导出和浏览器端交互仍缺少组件测试/E2E
+- 主包体积受 ECharts、Element Plus 影响较大，建议按需导入与分包；具体体积以当前 `npm run build` 输出为准
 
 ## 10. 修改代码时的注意事项
 
@@ -114,7 +116,7 @@ ComponentData: id / type / name / style / props / events / schemaVersion / respo
 
 ## 11. 接手检查清单
 
-阅读本文件 → 按任务读对应关键文件（不要只依赖 README）→ 查看 git 状态、保留已有修改 → 确认 `SCHEMA_VERSION` 与组件注册表协议 → AI 相关确认实际注册的是 `aiPageGeneratorV2()` → 手机端问题区分"横向宽度适配"与"纵向流式布局" → 改后跑 type-check/build + 相关人工回归 → 更新本文中过期内容
+阅读本文件 → 按任务读对应关键文件（不要只依赖 README）→ 查看 git 状态、保留已有修改 → 确认 `SCHEMA_VERSION` 与组件注册表协议 → AI 相关确认实际注册的是 `aiPageGeneratorV2()`，并沿 `pageEditAgent.ts` → `executionUnits.ts` → `unitExecutorGraph.ts` 阅读增量编辑链路 → 手机端问题区分"横向宽度适配"与"纵向流式布局" → 改后跑 type-check、相关 Vitest、build + 人工回归 → 更新本文中过期内容
 
 ## 12. 一句话讲解
 
