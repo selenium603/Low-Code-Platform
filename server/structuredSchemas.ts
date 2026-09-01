@@ -6,6 +6,13 @@ const number = { type: 'number' }
 const integer = { type: 'integer' }
 const boolean = { type: 'boolean' }
 const enumString = (values: string[]) => ({ type: 'string', enum: values })
+const clarificationCode = enumString([
+  'TARGET_AMBIGUOUS',
+  'DELETION_AUTH_REQUIRED',
+  'GEOMETRY_RELAYOUT_AUTH_REQUIRED',
+  'CONFLICTING_REQUIREMENTS',
+  'MISSING_EXECUTION_DATA'
+])
 const object = (properties: Record<string, JsonSchema>, required = Object.keys(properties)): JsonSchema => ({
   type: 'object',
   additionalProperties: false,
@@ -204,7 +211,10 @@ type EditSchemaOptions = {
   baseRevision: number
   operationLimit: number
   allowedComponentIds?: Set<string>
+  allowedEditComponentIds?: Set<string>
+  allowedDeleteComponentIds?: Set<string>
   allowedOperationKinds?: Set<string>
+  canClarify?: boolean
 }
 
 /**
@@ -219,7 +229,9 @@ export const createEditResponseSchema = (
   const editable = components.filter((component) => (
     Boolean(component.id)
     && knownTypes.has(component.type)
-    && (!options.allowedComponentIds || options.allowedComponentIds.has(component.id))
+    && (!options.allowedEditComponentIds
+      ? !options.allowedComponentIds || options.allowedComponentIds.has(component.id)
+      : options.allowedEditComponentIds.has(component.id))
   ))
   const componentIds = [...new Set(editable.map((component) => component.id))]
   const idsByType = new Map<string, string[]>()
@@ -240,13 +252,17 @@ export const createEditResponseSchema = (
   if (allows('addComponent')) {
     operations.push(...Object.keys(componentPropsProperties).map(addComponentOperation))
   }
-  if (componentIds.length && allows('removeComponent')) operations.push(removeComponentOperation(componentIds))
+  const deleteIds = [...new Set(components
+    .map((component) => component.id)
+    .filter((id) => Boolean(id) && options.allowedDeleteComponentIds?.has(id)))]
+  if (deleteIds.length && allows('removeComponent')) operations.push(removeComponentOperation(deleteIds))
   if (componentIds.length && allows('moveLayer')) operations.push(moveLayerOperation(componentIds))
 
-  if (!operations.length) {
+  if (!operations.length && options.canClarify !== false) {
     return object({
       type: { type: 'string', enum: ['need_clarification'] },
       question: { type: 'string', maxLength: 500 },
+      clarificationCode,
       baseRevision: { type: 'null' },
       summary: { type: 'null' },
       operations: { type: 'null' }
@@ -255,8 +271,9 @@ export const createEditResponseSchema = (
 
   // 根节点保持单一 object，避免部分 Structured Output 提供商拒绝 root oneOf。
   return object({
-    type: enumString(['page_patch', 'need_clarification']),
+    type: enumString(options.canClarify === false ? ['page_patch'] : ['page_patch', 'need_clarification']),
     question: nullable({ type: 'string', maxLength: 500 }),
+    clarificationCode: nullable(clarificationCode),
     baseRevision: nullable({ type: 'integer', const: options.baseRevision }),
     summary: nullable({ type: 'string', maxLength: 300 }),
     operations: nullable(array({ anyOf: operations }, {
@@ -284,28 +301,44 @@ export const layoutPlanSchema: JsonSchema = object({
   }), { minItems: 4, maxItems: 6 })
 })
 
-export const componentLocatorSchema: JsonSchema = object({
-  type: enumString(['selection', 'need_clarification']),
+export const createComponentLocatorSchema = (canClarify: boolean): JsonSchema => object({
+  type: enumString(canClarify ? ['selection', 'need_clarification'] : ['selection']),
   scope: nullable(enumString(['components', 'page'])),
   componentIds: nullable(array(string, { maxItems: 12 })),
   reason: nullable(string),
-  question: nullable(string)
+  question: nullable(string),
+  clarificationCode: nullable(clarificationCode)
+})
+export const componentLocatorSchema = createComponentLocatorSchema(true)
+
+export const createEditSemanticAnalysisSchema = (componentIds: string[]): JsonSchema => object({
+  type: enumString(['semantic_actions', 'need_clarification']),
+  actions: nullable(array(object({
+    actionId: { type: 'string', minLength: 1, maxLength: 80 },
+    kind: enumString(['add', 'update', 'replace', 'delete', 'preserve']),
+    instruction: { type: 'string', minLength: 1, maxLength: 500 },
+    targetScope: enumString(['page', 'components']),
+    componentTypes: array(enumString(['Text', 'Image', 'Button', 'Input', 'Form', 'Chart']), { maxItems: 6 }),
+    componentIds: array(componentIds.length ? enumString(componentIds) : string, { maxItems: 12 })
+  }), { minItems: 1, maxItems: 8 })),
+  question: nullable({ type: 'string', minLength: 1, maxLength: 500 }),
+  clarificationCode: nullable(clarificationCode)
 })
 
 export const contextIntentSchema: JsonSchema = object({
-  label: enumString(['local_edit', 'large_edit', 'full_relayout', 'question', 'need_clarification']),
-  reason: { type: 'string', minLength: 1, maxLength: 300 },
-  clarificationQuestion: nullable({ type: 'string', minLength: 1, maxLength: 500 })
+  intent: enumString(['local_edit', 'large_edit', 'full_relayout', 'question', 'chat', 'cancel', 'unresolved']),
+  relationToPending: enumString(['none', 'answer', 'supplement', 'delegate', 'replace', 'cancel', 'question', 'chat', 'unresolved']),
+  reason: { type: 'string', minLength: 1, maxLength: 300 }
 })
 
 export const toolRouteSchema: JsonSchema = object({
-  tool: enumString(['local_edit', 'large_edit', 'full_relayout', 'ask_clarification']),
-  reason: { type: 'string', minLength: 1, maxLength: 300 },
-  clarificationQuestion: nullable({ type: 'string', minLength: 1, maxLength: 500 })
+  intent: enumString(['local_edit', 'large_edit', 'full_relayout', 'question', 'chat', 'cancel', 'unresolved']),
+  relationToPending: enumString(['none', 'answer', 'supplement', 'delegate', 'replace', 'cancel', 'question', 'chat', 'unresolved']),
+  reason: { type: 'string', minLength: 1, maxLength: 300 }
 })
 
-export const largeEditResponseSchema: JsonSchema = object({
-  type: enumString(['page_edit_plan', 'need_clarification']),
+export const createLargeEditResponseSchema = (canClarify: boolean): JsonSchema => object({
+  type: enumString(canClarify ? ['page_edit_plan', 'need_clarification'] : ['page_edit_plan']),
   summary: nullable(string),
   steps: nullable(array(object({
     id: string,
@@ -314,7 +347,14 @@ export const largeEditResponseSchema: JsonSchema = object({
     scope: enumString(['page', 'components']),
     operationBudget: integer
   }), { minItems: 2, maxItems: 6 })),
-  question: nullable(string)
+  question: nullable(string),
+  clarificationCode: nullable(clarificationCode)
+})
+export const largeEditResponseSchema = createLargeEditResponseSchema(true)
+
+export const assistantReplySchema: JsonSchema = object({
+  type: enumString(['assistant_reply']),
+  message: { type: 'string', minLength: 1, maxLength: 1_500 }
 })
 
 export const strictResponseFormat = (name: string, schema: JsonSchema) => ({

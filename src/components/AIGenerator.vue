@@ -38,6 +38,9 @@
         <div class="message-bubble">
           {{ message.content }}
           <small v-if="message.patchSummary">{{ message.patchSummary }}</small>
+          <small v-if="message.role === 'user' && message.status !== 'completed'">
+            {{ message.status === 'processing' ? '处理中…' : message.status === 'cancelled' ? '已取消' : '执行失败，可重新发送' }}
+          </small>
         </div>
       </div>
     </div>
@@ -84,7 +87,7 @@ import { computed, nextTick, ref, shallowRef, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 import { generatePageFromPrompt } from '@/services/aiPage'
-import { editPageFromPrompt } from '@/services/aiEditPage'
+import { AIEditPageError, editPageFromPrompt } from '@/services/aiEditPage'
 import { useEditorStore } from '@/stores/editor'
 import { useHistoryStore } from '@/stores/history'
 import { useAIConversationStore } from '@/stores/aiConversation'
@@ -150,10 +153,13 @@ const waitForCloseDecision = async () => {
   if (decision) await decision
 }
 
-const discardPendingEditMessage = () => {
+const finishPendingEditMessage = (
+  status: 'completed' | 'failed' | 'cancelled',
+  details: { retryable?: boolean; errorCode?: string } = {}
+) => {
   const pending = pendingEditMessage.value
   if (!pending) return
-  conversationStore.removeMessage(pending.pageId, pending.messageId)
+  conversationStore.updateMessageStatus(pending.pageId, pending.messageId, status, details)
   pendingEditMessage.value = null
 }
 
@@ -190,10 +196,23 @@ const edit = async (message: string, signal: AbortSignal) => {
   const page = currentPage.value
   if (!page) throw new Error('当前没有可修改的页面，请先生成或新建页面。')
   const baseRevision = editorStore.pageRevision
+  conversationStore.syncRevision(page.id, baseRevision)
   const session = conversationStore.getSession(page.id, baseRevision)
-  const requestMessages = JSON.parse(JSON.stringify(session.recentMessages))
+  const requestMessages = JSON.parse(JSON.stringify(
+    session.recentMessages.filter((item) => item.status === 'completed')
+  ))
   const requestMemory = JSON.parse(JSON.stringify(session.memory))
-  const pendingMessage = conversationStore.appendMessage(page.id, baseRevision, 'user', message)
+  const requestPendingTask = session.pendingTask
+    ? JSON.parse(JSON.stringify(session.pendingTask))
+    : null
+  const pendingMessage = conversationStore.appendMessage(
+    page.id,
+    baseRevision,
+    'user',
+    message,
+    undefined,
+    { status: 'processing', taskId: session.pendingTask?.taskId }
+  )
   pendingEditMessage.value = { pageId: page.id, messageId: pendingMessage.id }
   progressText.value = '正在读取当前页面和最近对话…'
 
@@ -202,7 +221,8 @@ const edit = async (message: string, signal: AbortSignal) => {
     page: JSON.parse(JSON.stringify(page)),
     baseRevision,
     recentMessages: requestMessages,
-    conversationMemory: requestMemory
+    conversationMemory: requestMemory,
+    pendingTask: requestPendingTask
   }, (progress) => { progressText.value = progress }, signal)
 
   await waitForCloseDecision()
@@ -211,22 +231,56 @@ const edit = async (message: string, signal: AbortSignal) => {
   }
 
   if (editorStore.pageRevision !== baseRevision) {
-    throw new Error('AI 处理期间页面已发生修改。为避免覆盖手工操作，请重新发送这条要求。')
-  }
-
-  if (response.result.type === 'need_clarification') {
-    conversationStore.appendMessage(page.id, baseRevision, 'assistant', response.result.question)
-    conversationStore.rememberUserIntent(page.id, baseRevision, message)
-    conversationStore.rememberOpenQuestion(page.id, baseRevision, response.result.question)
-    pendingEditMessage.value = null
+    finishPendingEditMessage('failed', { retryable: true, errorCode: 'REVISION_CONFLICT' })
+    conversationStore.appendMessage(page.id, editorStore.pageRevision, 'assistant', 'AI 处理期间页面已发生修改。为避免覆盖手工操作，本次结果未提交；你可以重新发送这条要求。')
+    ElMessage.warning('页面已变化，本次 AI 结果未提交')
     return
   }
 
-  if (response.result.type !== 'page_edit_completed') {
-    throw new Error('AI 编辑服务未返回可提交的最终页面，请重试。')
+  if (response.result.type === 'clarification_requested') {
+    conversationStore.appendMessage(page.id, baseRevision, 'assistant', response.result.question)
+    conversationStore.setPendingTask(page.id, baseRevision, response.result.pendingTask)
+    finishPendingEditMessage('completed')
+    return
   }
+
+  if (response.result.type === 'assistant_reply') {
+    conversationStore.appendMessage(page.id, baseRevision, 'assistant', response.result.message)
+    if (response.result.pendingTask) conversationStore.setPendingTask(page.id, baseRevision, response.result.pendingTask)
+    else conversationStore.clearPendingTask(page.id, baseRevision)
+    finishPendingEditMessage('completed')
+    return
+  }
+
+  if (response.result.type === 'task_cancelled') {
+    conversationStore.clearPendingTask(page.id, baseRevision)
+    conversationStore.appendMessage(page.id, baseRevision, 'assistant', response.result.message)
+    finishPendingEditMessage('completed')
+    return
+  }
+
+  if (response.result.type === 'no_change') {
+    conversationStore.clearPendingTask(page.id, baseRevision)
+    conversationStore.appendMessage(page.id, baseRevision, 'assistant', response.result.message)
+    finishPendingEditMessage('completed')
+    return
+  }
+
+  if (response.result.type === 'execution_failed') {
+    if (response.result.pendingTask) conversationStore.setPendingTask(page.id, baseRevision, response.result.pendingTask)
+    finishPendingEditMessage('failed', { retryable: response.result.retryable, errorCode: response.result.code })
+    throw new AIEditPageError(response.result.message, response.result.code)
+  }
+
+  if (response.result.type !== 'page_edit_completed') {
+    finishPendingEditMessage('failed', { retryable: true, errorCode: 'UNKNOWN_TERMINAL_RESULT' })
+    throw new Error('AI 编辑服务返回了未知终态，请重试。')
+  }
+
   if (response.result.baseRevision !== baseRevision) {
-    throw new Error('AI 返回结果基于过期的页面 revision，请重新发送这条要求。')
+    finishPendingEditMessage('failed', { retryable: true, errorCode: 'REVISION_CONFLICT' })
+    conversationStore.appendMessage(page.id, baseRevision, 'assistant', 'AI 返回结果基于过期的页面版本，本次结果未提交；你可以重新发送这条要求。')
+    return
   }
 
   const nextPage = JSON.parse(JSON.stringify(response.result.page)) as typeof page
@@ -236,13 +290,17 @@ const edit = async (message: string, signal: AbortSignal) => {
   const allWarnings = response.result.warnings
 
   if (editorStore.pageRevision !== baseRevision) {
-    throw new Error('AI 处理期间页面已发生修改。为避免覆盖手工操作，请重新发送这条要求。')
+    finishPendingEditMessage('failed', { retryable: true, errorCode: 'REVISION_CONFLICT' })
+    conversationStore.appendMessage(page.id, editorStore.pageRevision, 'assistant', '页面在提交前发生了变化，本次 AI 结果未覆盖当前页面。')
+    ElMessage.warning('页面已变化，本次 AI 结果未提交')
+    return
   }
 
   progressText.value = stepCount > 1 ? '所有步骤已通过校验，正在一次性提交页面…' : '正在提交修改…'
   editorStore.applyAIPagePatchTransaction(nextPage, summary, baseRevision)
   editorStore.persistPage()
   const nextRevision = editorStore.pageRevision
+  conversationStore.clearPendingTask(page.id, nextRevision)
   conversationStore.appendMessage(
     page.id,
     nextRevision,
@@ -252,9 +310,9 @@ const edit = async (message: string, signal: AbortSignal) => {
       ? `分 ${stepCount} 步执行 ${operationCount} 个操作，并安全修复 ${allWarnings.length} 项数据；已作为一条命令提交。`
       : `分 ${stepCount} 步完成 ${operationCount} 项修改，已作为一条命令提交，可通过顶部撤销恢复。`
   )
-  conversationStore.rememberUserIntent(page.id, nextRevision, message)
+  conversationStore.rememberUserIntent(page.id, nextRevision, response.result.executedRequest || message)
   conversationStore.rememberCompletedChange(page.id, nextRevision, summary)
-  pendingEditMessage.value = null
+  finishPendingEditMessage('completed')
   ElMessage.success(`AI 页面修改完成：${summary}`)
 }
 
@@ -276,11 +334,15 @@ const submit = async () => {
     throwIfAborted(controller.signal)
     prompt.value = ''
   } catch (error) {
-    discardPendingEditMessage()
     if (isAbortError(error)) {
+      finishPendingEditMessage('cancelled')
       errorMessage.value = ''
       ElMessage.info('已取消本次 AI 请求')
     } else {
+      finishPendingEditMessage('failed', {
+        retryable: true,
+        errorCode: error instanceof AIEditPageError ? error.code : 'AI_EDIT_FAILED'
+      })
       errorMessage.value = error instanceof Error ? error.message : 'AI 页面处理失败，请稍后重试。'
     }
   } finally {

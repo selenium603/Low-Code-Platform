@@ -70,7 +70,60 @@ const isDecorativeComponent = (component: ComponentData, style: ComponentStyle) 
   )
 )
 
-type GeometryValidation = { id: string; device: DeviceType; gap: number }
+export interface GeometryRect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+export interface GeometryConflictDetail {
+  kind: 'boundary' | 'collision'
+  device: DeviceType
+  changedComponentId: string
+  changedComponentName: string
+  conflictingComponentId: string | null
+  conflictingComponentName: string | null
+  preferredRect: GeometryRect
+  conflictingRect: GeometryRect | null
+  requiredGap: number
+  preExisting: boolean
+  worsened: boolean
+}
+
+export class GeometryConflictError extends Error {
+  public readonly conflict: GeometryConflictDetail
+
+  constructor(
+    public readonly conflicts: GeometryConflictDetail[],
+    public readonly affectedComponentIds: string[],
+    public readonly devices: DeviceType[],
+    public readonly overflow: boolean
+  ) {
+    const conflict = conflicts[0]!
+    const location = conflict.device === DeviceType.MOBILE ? '手机端' : '桌面端'
+    const reason = conflict.kind === 'boundary'
+      ? `超出${location}页面边界`
+      : `与“${conflict.conflictingComponentName || conflict.conflictingComponentId}”重叠或间距不足 ${conflict.requiredGap}px`
+    super(`AI 修改会导致“${conflict.changedComponentName}”${reason}，且当前影响区域内没有可自动修复的合法位置。`)
+    this.name = 'GeometryConflictError'
+    this.conflict = conflict
+  }
+}
+
+type PlacementConstraint = {
+  targetId: string
+  relation: 'above' | 'below' | 'left' | 'right'
+  align: 'start' | 'center' | 'end'
+  gap: number
+}
+
+type GeometryValidation = {
+  id: string
+  device: DeviceType
+  gap: number
+  placementConstraint?: PlacementConstraint
+}
 
 const conflictsWithGap = (first: ComponentStyle, second: ComponentStyle, gap: number) => (
   first.left < second.left + second.width + gap
@@ -79,11 +132,196 @@ const conflictsWithGap = (first: ComponentStyle, second: ComponentStyle, gap: nu
   && first.top + first.height + gap > second.top
 )
 
+const rectOf = (style: ComponentStyle): GeometryRect => ({
+  left: style.left,
+  top: style.top,
+  width: style.width,
+  height: style.height
+})
+
+const collisionSeverity = (first: ComponentStyle, second: ComponentStyle, gap: number) => {
+  const halfGap = gap / 2
+  const horizontalDepth = Math.min(
+    first.left + first.width + halfGap,
+    second.left + second.width + halfGap
+  ) - Math.max(first.left - halfGap, second.left - halfGap)
+  const verticalDepth = Math.min(
+    first.top + first.height + halfGap,
+    second.top + second.height + halfGap
+  ) - Math.max(first.top - halfGap, second.top - halfGap)
+  return horizontalDepth > 0 && verticalDepth > 0
+    ? Math.min(horizontalDepth, verticalDepth)
+    : 0
+}
+
+const boundarySeverity = (style: ComponentStyle, pageStyle: PageStyle, padding: number) => (
+  Math.max(0, padding - style.left)
+  + Math.max(0, padding - style.top)
+  + Math.max(0, style.left + style.width - (pageStyle.width - padding))
+  + Math.max(0, style.top + style.height - (pageStyle.height - padding))
+)
+
+const effectivePageStyle = (page: PageData, device: DeviceType): PageStyle => (
+  device === DeviceType.DESKTOP
+    ? page.style
+    : { ...page.style, ...(page.responsiveOverrides?.mobile || {}) }
+)
+
+const isAllowedDecorationOverlap = (
+  first: ComponentData,
+  firstStyle: ComponentStyle,
+  second: ComponentData,
+  secondStyle: ComponentStyle
+) => (
+  (isDecorativeComponent(first, firstStyle) && firstStyle.zIndex < secondStyle.zIndex)
+  || (isDecorativeComponent(second, secondStyle) && secondStyle.zIndex < firstStyle.zIndex)
+)
+
+const blockingGeometryConflicts = (
+  source: PageData,
+  page: PageData,
+  changed: GeometryValidation
+): GeometryConflictDetail[] => {
+  const conflicts: GeometryConflictDetail[] = []
+  const component = getComponent(page, changed.id)
+  const style = effectiveStyle(component, changed.device)
+  const pageStyle = effectivePageStyle(page, changed.device)
+  const padding = changed.device === DeviceType.MOBILE ? MOBILE_PADDING : 0
+  const currentBoundarySeverity = boundarySeverity(style, pageStyle, padding)
+  if (currentBoundarySeverity > 0) {
+    const original = source.components.find((item) => item.id === component.id)
+    const originalSeverity = original
+      ? boundarySeverity(
+          effectiveStyle(original, changed.device),
+          effectivePageStyle(source, changed.device),
+          padding
+        )
+      : 0
+    if (originalSeverity <= 0 || currentBoundarySeverity > originalSeverity + 0.01) {
+      conflicts.push({
+        kind: 'boundary',
+        device: changed.device,
+        changedComponentId: component.id,
+        changedComponentName: component.name,
+        conflictingComponentId: null,
+        conflictingComponentName: null,
+        preferredRect: rectOf(style),
+        conflictingRect: null,
+        requiredGap: changed.gap,
+        preExisting: originalSeverity > 0,
+        worsened: originalSeverity > 0 && currentBoundarySeverity > originalSeverity + 0.01
+      })
+    }
+  }
+
+  for (const other of page.components) {
+    if (other.id === component.id) continue
+    const otherStyle = effectiveStyle(other, changed.device)
+    if (isAllowedDecorationOverlap(component, style, other, otherStyle)) continue
+    const currentSeverity = collisionSeverity(style, otherStyle, changed.gap)
+    if (currentSeverity <= 0) continue
+    const original = source.components.find((item) => item.id === component.id)
+    const originalOther = source.components.find((item) => item.id === other.id)
+    const originalSeverity = original && originalOther
+      ? collisionSeverity(
+          effectiveStyle(original, changed.device),
+          effectiveStyle(originalOther, changed.device),
+          changed.gap
+        )
+      : 0
+    if (originalSeverity > 0 && currentSeverity <= originalSeverity + 0.01) continue
+    conflicts.push({
+      kind: 'collision',
+      device: changed.device,
+      changedComponentId: component.id,
+      changedComponentName: component.name,
+      conflictingComponentId: other.id,
+      conflictingComponentName: other.name,
+      preferredRect: rectOf(style),
+      conflictingRect: rectOf(otherStyle),
+      requiredGap: changed.gap,
+      preExisting: originalSeverity > 0,
+      worsened: originalSeverity > 0 && currentSeverity > originalSeverity + 0.01
+    })
+  }
+  return conflicts
+}
+
+const blockingGeometryConflict = (
+  source: PageData,
+  page: PageData,
+  changed: GeometryValidation
+) => blockingGeometryConflicts(source, page, changed)[0] || null
+
+const geometryConflictKey = (conflict: GeometryConflictDetail) => {
+  const ids = conflict.conflictingComponentId
+    ? [conflict.changedComponentId, conflict.conflictingComponentId].sort().join(':')
+    : conflict.changedComponentId
+  return `${conflict.device}:${conflict.kind}:${ids}`
+}
+
+export const collectGeometryConflictClosure = (
+  source: PageData,
+  page: PageData,
+  seedChanges: GeometryValidation[],
+  maxComponents = 12
+) => {
+  const existingIds = new Set(page.components.map((component) => component.id))
+  const seeds = uniqueGeometryChanges(seedChanges).filter((change) => existingIds.has(change.id))
+  const queue: GeometryValidation[] = []
+  const queued = new Set<string>()
+  const affected = new Set<string>()
+  let overflow = false
+  for (const seed of seeds) {
+    const key = `${seed.id}:${seed.device}`
+    if (affected.has(seed.id)) {
+      if (!queued.has(key)) {
+        queued.add(key)
+        queue.push(seed)
+      }
+      continue
+    }
+    if (affected.size >= maxComponents) {
+      overflow = true
+      continue
+    }
+    affected.add(seed.id)
+    queued.add(key)
+    queue.push(seed)
+  }
+  const conflicts = new Map<string, GeometryConflictDetail>()
+  for (let index = 0; index < queue.length; index += 1) {
+    const changed = queue[index]!
+    for (const conflict of blockingGeometryConflicts(source, page, changed)) {
+      conflicts.set(geometryConflictKey(conflict), conflict)
+      const otherId = conflict.conflictingComponentId
+      if (!otherId || affected.has(otherId)) continue
+      if (affected.size >= maxComponents) {
+        overflow = true
+        continue
+      }
+      affected.add(otherId)
+      const key = `${otherId}:${changed.device}`
+      if (!queued.has(key)) {
+        queued.add(key)
+        queue.push({ id: otherId, device: changed.device, gap: changed.gap })
+      }
+    }
+  }
+  return {
+    conflicts: [...conflicts.values()],
+    affectedComponentIds: [...affected],
+    devices: [...new Set([...conflicts.values()].map((conflict) => conflict.device))],
+    overflow
+  }
+}
+
 /**
  * 只校验本轮发生几何或层级变化的组件，避免历史页面中的旧布局问题阻断无关修改。
  * 装饰图只有位于内容下层时才允许重叠，与整页生成链路保持一致。
  */
 const validateChangedGeometry = (page: PageData, changes: GeometryValidation[]) => {
+  const errors = new Set<string>()
   for (const changed of changes) {
     const component = getComponent(page, changed.id)
     const style = effectiveStyle(component, changed.device)
@@ -97,7 +335,7 @@ const validateChangedGeometry = (page: PageData, changes: GeometryValidation[]) 
       || style.left + style.width > pageStyle.width - padding
       || style.top + style.height > pageStyle.height - padding
     ) {
-      throw new Error(`AI 修改会导致“${component.name}”超出${changed.device === DeviceType.MOBILE ? '手机端' : '桌面端'}页面边界。`)
+      errors.add(`“${component.name}”超出${changed.device === DeviceType.MOBILE ? '手机端' : '桌面端'}页面边界`)
     }
 
     for (const other of page.components) {
@@ -108,9 +346,11 @@ const validateChangedGeometry = (page: PageData, changes: GeometryValidation[]) 
       const otherIsLowerDecoration = isDecorativeComponent(other, otherStyle) && otherStyle.zIndex < style.zIndex
       if (componentIsLowerDecoration || otherIsLowerDecoration) continue
       const suffix = changed.gap ? `或间距不足 ${changed.gap}px` : ''
-      throw new Error(`AI 修改会导致“${component.name}”与“${other.name}”重叠${suffix}，已取消本次修改。`)
+      const names = [component.name, other.name].sort().join('”与“')
+      errors.add(`“${names}”重叠${suffix}`)
     }
   }
+  if (errors.size) throw new Error(`页面存在以下几何冲突：${[...errors].join('；')}，已取消本次修改。`)
 }
 
 /** 整页事务完成前使用；普通局部修改仍只校验本轮受影响组件。 */
@@ -120,6 +360,185 @@ export const validateFullPageGeometry = (page: PageData, gap = 16) => {
     { id: component.id, device: DeviceType.MOBILE, gap }
   ]))
   validateChangedGeometry(page, changes)
+}
+
+const placementMatches = (
+  rect: GeometryRect,
+  target: ComponentStyle,
+  constraint: PlacementConstraint
+) => {
+  const expectedCrossAxis = constraint.relation === 'above' || constraint.relation === 'below'
+    ? constraint.align === 'start'
+      ? target.left
+      : constraint.align === 'end'
+        ? target.left + target.width - rect.width
+        : target.left + (target.width - rect.width) / 2
+    : constraint.align === 'start'
+      ? target.top
+      : constraint.align === 'end'
+        ? target.top + target.height - rect.height
+        : target.top + (target.height - rect.height) / 2
+  if (constraint.relation === 'above') {
+    return rect.top + rect.height + constraint.gap <= target.top
+      && Math.abs(rect.left - expectedCrossAxis) < 0.01
+  }
+  if (constraint.relation === 'below') {
+    return rect.top >= target.top + target.height + constraint.gap
+      && Math.abs(rect.left - expectedCrossAxis) < 0.01
+  }
+  if (constraint.relation === 'left') {
+    return rect.left + rect.width + constraint.gap <= target.left
+      && Math.abs(rect.top - expectedCrossAxis) < 0.01
+  }
+  return rect.left >= target.left + target.width + constraint.gap
+    && Math.abs(rect.top - expectedCrossAxis) < 0.01
+}
+
+const findNearestValidRect = (
+  page: PageData,
+  component: ComponentData,
+  device: DeviceType,
+  preferred: GeometryRect,
+  gap: number,
+  constraint?: PlacementConstraint,
+  maxDistance = 96
+): GeometryRect | null => {
+  const pageStyle = effectivePageStyle(page, device)
+  const padding = device === DeviceType.MOBILE ? MOBILE_PADDING : 0
+  const maxLeft = pageStyle.width - padding - preferred.width
+  const maxTop = pageStyle.height - padding - preferred.height
+  if (maxLeft < padding || maxTop < padding) return null
+  const obstacles = page.components.filter((item) => item.id !== component.id)
+  const target = constraint
+    ? page.components.find((item) => item.id === constraint.targetId)
+    : null
+  if (constraint && !target) return null
+  const targetStyle = target ? effectiveStyle(target, device) : null
+  const step = 8
+  const lefts = new Set<number>([preferred.left, padding, maxLeft])
+  const tops = new Set<number>([preferred.top, padding, maxTop])
+  const scanLeftStart = Math.max(padding, Math.floor((preferred.left - maxDistance) / step) * step)
+  const scanLeftEnd = Math.min(maxLeft, preferred.left + maxDistance)
+  const scanTopStart = Math.max(padding, Math.floor((preferred.top - maxDistance) / step) * step)
+  const scanTopEnd = Math.min(maxTop, preferred.top + maxDistance)
+  for (let left = scanLeftStart; left <= scanLeftEnd; left += step) lefts.add(left)
+  for (let top = scanTopStart; top <= scanTopEnd; top += step) tops.add(top)
+  obstacles.forEach((other) => {
+    const style = effectiveStyle(other, device)
+    lefts.add(style.left - preferred.width - gap)
+    lefts.add(style.left + style.width + gap)
+    tops.add(style.top - preferred.height - gap)
+    tops.add(style.top + style.height + gap)
+  })
+  if (targetStyle && constraint) {
+    const alignedLeft = constraint.align === 'start'
+      ? targetStyle.left
+      : constraint.align === 'end'
+        ? targetStyle.left + targetStyle.width - preferred.width
+        : targetStyle.left + (targetStyle.width - preferred.width) / 2
+    const alignedTop = constraint.align === 'start'
+      ? targetStyle.top
+      : constraint.align === 'end'
+        ? targetStyle.top + targetStyle.height - preferred.height
+        : targetStyle.top + (targetStyle.height - preferred.height) / 2
+    lefts.add(alignedLeft)
+    tops.add(alignedTop)
+  }
+
+  const candidates: Array<GeometryRect & { distance: number }> = []
+  for (const left of lefts) {
+    if (left < padding || left > maxLeft) continue
+    for (const top of tops) {
+      if (top < padding || top > maxTop) continue
+      const rect = { left, top, width: preferred.width, height: preferred.height }
+      const distance = Math.abs(left - preferred.left) + Math.abs(top - preferred.top)
+      if (distance > maxDistance) continue
+      if (targetStyle && constraint && !placementMatches(rect, targetStyle, constraint)) continue
+      const style = { ...effectiveStyle(component, device), ...rect }
+      const free = obstacles.every((other) => {
+        const otherStyle = effectiveStyle(other, device)
+        return isAllowedDecorationOverlap(component, style, other, otherStyle)
+          || !conflictsWithGap(style, otherStyle, gap)
+      })
+      if (free) candidates.push({ ...rect, distance })
+    }
+  }
+  candidates.sort((first, second) => (
+    first.distance - second.distance
+    || first.top - second.top
+    || first.left - second.left
+  ))
+  const selected = candidates[0]
+  return selected
+    ? { left: selected.left, top: selected.top, width: selected.width, height: selected.height }
+    : null
+}
+
+const uniqueGeometryChanges = (changes: GeometryValidation[]) => {
+  const unique = new Map<string, GeometryValidation>()
+  changes.forEach((change) => {
+    const key = `${change.id}:${change.device}`
+    const previous = unique.get(key)
+    unique.set(key, {
+      ...previous,
+      ...change,
+      gap: Math.max(previous?.gap || 0, change.gap),
+      placementConstraint: change.placementConstraint || previous?.placementConstraint
+    })
+  })
+  return [...unique.values()].sort((first, second) => (
+    first.device.localeCompare(second.device) || first.id.localeCompare(second.id)
+  ))
+}
+
+const repairChangedGeometry = (
+  source: PageData,
+  page: PageData,
+  rawChanges: GeometryValidation[]
+) => {
+  const warnings: string[] = []
+  const unresolvedChanges: GeometryValidation[] = []
+  const existingIds = new Set(page.components.map((component) => component.id))
+  const changes = uniqueGeometryChanges(rawChanges).filter((change) => existingIds.has(change.id))
+  for (const changed of changes) {
+    const component = getComponent(page, changed.id)
+    clampComponent(component, page, changed.device)
+    const conflict = blockingGeometryConflict(source, page, changed)
+    if (!conflict) continue
+    const preferred = rectOf(effectiveStyle(component, changed.device))
+    const repaired = findNearestValidRect(
+      page,
+      component,
+      changed.device,
+      preferred,
+      changed.gap,
+      changed.placementConstraint
+    )
+    if (!repaired) {
+      unresolvedChanges.push(changed)
+      continue
+    }
+    applyStyle(component, changed.device, { left: repaired.left, top: repaired.top })
+    const remaining = blockingGeometryConflict(source, page, changed)
+    if (remaining) {
+      unresolvedChanges.push(changed)
+      continue
+    }
+    const distance = Math.abs(repaired.left - preferred.left) + Math.abs(repaired.top - preferred.top)
+    warnings.push(
+      `已在${changed.device === DeviceType.MOBILE ? '手机端' : '桌面端'}自动移动“${component.name}” ${distance}px，以避免重叠并保持至少 ${changed.gap}px 间距。`
+    )
+  }
+  const closure = collectGeometryConflictClosure(source, page, [...changes, ...unresolvedChanges])
+  if (closure.conflicts.length) {
+    throw new GeometryConflictError(
+      closure.conflicts,
+      closure.affectedComponentIds,
+      closure.devices,
+      closure.overflow
+    )
+  }
+  return warnings
 }
 
 const applyStyle = (component: ComponentData, device: DeviceType, changes: Partial<ComponentStyle>) => {
@@ -132,6 +551,30 @@ const applyStyle = (component: ComponentData, device: DeviceType, changes: Parti
     ...(component.responsiveOverrides.mobile || {}),
     ...changes
   }
+}
+
+const affectedComponentDevices = (
+  component: ComponentData,
+  device: DeviceType,
+  changedKeys: Array<keyof ComponentStyle>
+) => {
+  if (device === DeviceType.MOBILE) return [DeviceType.MOBILE]
+  const devices: DeviceType[] = [DeviceType.DESKTOP]
+  const mobile = component.responsiveOverrides?.mobile
+  if (changedKeys.some((key) => mobile?.[key] === undefined)) devices.push(DeviceType.MOBILE)
+  return devices
+}
+
+const affectedPageDevices = (
+  page: PageData,
+  device: DeviceType,
+  changedKeys: Array<keyof PageStyle>
+) => {
+  if (device === DeviceType.MOBILE) return [DeviceType.MOBILE]
+  const devices: DeviceType[] = [DeviceType.DESKTOP]
+  const mobile = page.responsiveOverrides?.mobile
+  if (changedKeys.some((key) => mobile?.[key] === undefined)) devices.push(DeviceType.MOBILE)
+  return devices
 }
 
 const clampComponent = (component: ComponentData, page: PageData, device: DeviceType) => {
@@ -435,13 +878,22 @@ export const applyAIPagePatch = (
         break
       case 'updateStyle': {
         const component = getComponent(page, operation.componentId)
+        const before = { ...effectiveStyle(component, operation.device) }
         const changes = sanitizeStyleChanges(operation.changes)
         applyStyle(component, operation.device, changes)
         clampComponent(component, page, operation.device)
-        if (['top', 'left', 'width', 'height'].some((key) => key in changes)) {
-          geometryChanges.push({ id: component.id, device: operation.device, gap: 16 })
-        } else if ('rotate' in changes || 'opacity' in changes) {
-          geometryChanges.push({ id: component.id, device: operation.device, gap: 0 })
+        const geometryKeys = (['top', 'left', 'width', 'height'] as Array<keyof ComponentStyle>)
+          .filter((key) => effectiveStyle(component, operation.device)[key] !== before[key])
+        const layerKeys = (['rotate', 'opacity'] as Array<keyof ComponentStyle>)
+          .filter((key) => effectiveStyle(component, operation.device)[key] !== before[key])
+        if (geometryKeys.length) {
+          affectedComponentDevices(component, operation.device, geometryKeys).forEach((device) => {
+            geometryChanges.push({ id: component.id, device, gap: 16 })
+          })
+        } else if (layerKeys.length) {
+          affectedComponentDevices(component, operation.device, layerKeys).forEach((device) => {
+            geometryChanges.push({ id: component.id, device, gap: 0 })
+          })
         }
         break
       }
@@ -457,13 +909,38 @@ export const applyAIPagePatch = (
           if (!page.responsiveOverrides) page.responsiveOverrides = {}
           page.responsiveOverrides.mobile = { ...(page.responsiveOverrides.mobile || {}), ...next }
         }
-        if (next.width !== undefined || next.height !== undefined) resizedPages.add(operation.device)
+        const resizedKeys = (['width', 'height'] as Array<keyof PageStyle>)
+          .filter((key) => next[key] !== undefined)
+        if (resizedKeys.length) {
+          affectedPageDevices(page, operation.device, resizedKeys).forEach((device) => resizedPages.add(device))
+        }
         break
       }
-      case 'placeRelative':
+      case 'placeRelative': {
+        const component = getComponent(page, operation.componentId)
+        const before = { ...effectiveStyle(component, operation.device) }
         placeRelative(page, operation)
-        geometryChanges.push({ id: operation.componentId, device: operation.device, gap: 16 })
+        const changedKeys = (['top', 'left', 'width', 'height', 'rotate'] as Array<keyof ComponentStyle>)
+          .filter((key) => effectiveStyle(component, operation.device)[key] !== before[key])
+        if (changedKeys.length) affectedComponentDevices(component, operation.device, changedKeys).forEach((device) => {
+          geometryChanges.push({
+            id: operation.componentId,
+            device,
+            gap: 16,
+            ...(device === operation.device
+              ? {
+                  placementConstraint: {
+                    targetId: operation.targetId,
+                    relation: operation.relation,
+                    align: operation.align || 'center',
+                    gap: Math.max(0, Math.min(96, finite(operation.gap) ? operation.gap : 16))
+                  }
+                }
+              : {})
+          })
+        })
         break
+      }
       case 'addComponent': {
         const id = createComponentId(operationIndex)
         if (!/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(id)) {
@@ -508,9 +985,9 @@ export const applyAIPagePatch = (
     width: MOBILE_WIDTH_THRESHOLD,
     height: Math.max(812, mobileBottom + MOBILE_PADDING)
   }
-  validateChangedGeometry(page, geometryChanges)
+  const geometryWarnings = repairChangedGeometry(source, page, geometryChanges)
   page.meta.updatedAt = updatedAt
 
   const repaired = validateAndRepairPageData(page)
-  return { page: repaired.page, warnings: repaired.warnings, patch }
+  return { page: repaired.page, warnings: [...geometryWarnings, ...repaired.warnings], patch }
 }

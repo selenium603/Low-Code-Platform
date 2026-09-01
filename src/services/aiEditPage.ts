@@ -1,12 +1,21 @@
-import type { AIClarification, AIEditRequest, AIPageEditCompleted } from '@/types/aiPatch'
+import type { AIEditRequest, PageEditGraphResult } from '@/types/aiPatch'
 
-type TerminalEditResult = AIClarification | AIPageEditCompleted
+type TerminalEditResult = PageEditGraphResult
 
 type EditEvent = {
   type: 'progress' | 'success' | 'error'
+  code?: string
   message?: string
   result?: TerminalEditResult
   attempts?: number
+}
+
+export class AIEditPageError extends Error {
+  constructor(message: string, public readonly code?: string) {
+    super(message)
+    this.name = 'AIEditPageError'
+  }
+
 }
 
 export const editPageFromPrompt = async (
@@ -22,8 +31,8 @@ export const editPageFromPrompt = async (
   })
   const contentType = response.headers.get('content-type') || ''
   if (!contentType.includes('text/event-stream')) {
-    const data = await response.json() as { result?: TerminalEditResult; attempts?: number; message?: string }
-    if (!response.ok || !data.result) throw new Error(data.message || 'AI 页面修改失败，请重试。')
+    const data = await response.json() as { result?: TerminalEditResult; attempts?: number; code?: string; message?: string }
+    if (!response.ok || !data.result) throw new AIEditPageError(data.message || 'AI 页面修改失败，请重试。', data.code)
     return { result: data.result, attempts: data.attempts || 1 }
   }
 
@@ -32,11 +41,15 @@ export const editPageFromPrompt = async (
   const decoder = new TextDecoder()
   let buffer = ''
   let result: { result: TerminalEditResult; attempts: number } | null = null
-  let failure = ''
+  let failureMessage = ''
+  let failureCode: string | undefined
 
   const isTerminalResult = (value: unknown): value is TerminalEditResult => Boolean(
     value && typeof value === 'object'
-    && ['need_clarification', 'page_edit_completed'].includes(String((value as { type?: unknown }).type))
+    && [
+      'clarification_requested', 'page_edit_completed', 'assistant_reply',
+      'task_cancelled', 'no_change', 'execution_failed'
+    ].includes(String((value as { type?: unknown }).type))
   )
 
   const consume = (rawEvent: string) => {
@@ -47,9 +60,12 @@ export const editPageFromPrompt = async (
     if (event.type === 'success' && isTerminalResult(event.result)) {
       result = { result: event.result, attempts: event.attempts || 1 }
     } else if (event.type === 'success') {
-      failure = 'AI 编辑服务未返回可提交的最终页面。'
+      failureMessage = 'AI 编辑服务未返回可提交的最终页面。'
     }
-    if (event.type === 'error') failure = event.message || 'AI 页面修改失败，请重试。'
+    if (event.type === 'error') {
+      failureMessage = event.message || 'AI 页面修改失败，请重试。'
+      failureCode = event.code
+    }
   }
 
   while (true) {
@@ -61,7 +77,7 @@ export const editPageFromPrompt = async (
     if (done) break
   }
   if (buffer.trim()) consume(buffer)
-  if (failure) throw new Error(failure)
-  if (!result) throw new Error('AI 页面修改连接已结束，但未收到最终页面或澄清问题。')
+  if (failureMessage) throw new AIEditPageError(failureMessage, failureCode)
+  if (!result) throw new Error('AI 页面修改连接已结束，但未收到有效终态。')
   return result
 }

@@ -7,10 +7,14 @@ import { retrieveComponentsWithRag } from '../../componentRag'
 import { createPageEditAgent } from '../graph/pageEditAgent'
 import { createInitialPageEditState, type PageEditGraphResult, type PageEditStateValue } from '../graph/pageEditState'
 import { createDefaultLargeEditPlanner } from '../graph/largeEditGraph'
+import { getPendingTaskSecret, verifyPendingTask } from '../graph/pendingTaskIntegrity'
 import { createOpenRouterClient } from '../model/openRouterClient'
 import { createSSEWriter } from './sse'
 
+const AI_EDIT_SERVER_VERSION = 'pending-task-v2'
+
 export interface PageEditEnvironment {
+  NODE_ENV?: string
   OPENROUTER_API_KEY?: string
   AI_BASE_URL?: string
   AI_MODEL?: string
@@ -22,6 +26,7 @@ export interface PageEditEnvironment {
   AI_EMBEDDING_API_KEY?: string
   AI_EMBEDDING_BASE_URL?: string
   AI_EMBEDDING_MODEL?: string
+  AI_PENDING_TASK_SECRET?: string
 }
 
 type PageEditAgentInvoker = {
@@ -52,18 +57,25 @@ const memoryFrom = (value: unknown): AIConversationMemory => {
   }
 }
 
-const messagesFrom = (value: unknown): AIConversationMessage[] => Array.isArray(value)
-  ? value.slice(-6).flatMap((item, index) => {
+export const messagesFrom = (value: unknown): AIConversationMessage[] => Array.isArray(value)
+  ? value.flatMap((item, index) => {
       if (!item || typeof item !== 'object') return []
       const source = item as Record<string, unknown>
       if ((source.role !== 'user' && source.role !== 'assistant') || typeof source.content !== 'string') return []
+      const status = source.status == null
+        ? 'completed'
+        : ['processing', 'completed', 'failed', 'cancelled'].includes(String(source.status))
+          ? source.status as AIConversationMessage['status']
+          : null
+      if (!status) return []
       return [{
         id: typeof source.id === 'string' ? source.id : `message-${index}`,
-        role: source.role,
+        role: source.role as AIConversationMessage['role'],
         content: source.content.slice(0, 600),
-        createdAt: typeof source.createdAt === 'string' ? source.createdAt : ''
+        createdAt: typeof source.createdAt === 'string' ? source.createdAt : '',
+        status
       }]
-    })
+    }).filter((message) => message.status === 'completed').slice(-6)
   : []
 
 const jsonReply = (response: ServerResponse, status: number, payload: Record<string, unknown>) => {
@@ -81,6 +93,13 @@ export const createEditPageHandler = (options: {
   if (request.method !== 'POST') return jsonReply(response, 405, { code: 'METHOD_NOT_ALLOWED', message: '仅支持 POST 请求。' })
   if (!options.env.OPENROUTER_API_KEY && !options.createAgent) {
     return jsonReply(response, 503, { code: 'KEY_NOT_CONFIGURED', message: '未检测到 OPENROUTER_API_KEY。请检查 .env.local 并重启 npm run dev。' })
+  }
+  if ((options.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'production')
+    && !options.env.AI_PENDING_TASK_SECRET?.trim()) {
+    return jsonReply(response, 503, {
+      code: 'PENDING_TASK_SECRET_NOT_CONFIGURED',
+      message: '生产环境必须配置 AI_PENDING_TASK_SECRET。'
+    })
   }
 
   const controller = new AbortController()
@@ -102,6 +121,7 @@ export const createEditPageHandler = (options: {
     response.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
     response.setHeader('Cache-Control', 'no-cache, no-transform')
     response.setHeader('Connection', 'keep-alive')
+    response.setHeader('X-AI-Edit-Version', AI_EDIT_SERVER_VERSION)
     response.flushHeaders?.()
     const stream = createSSEWriter(response, controller.signal)
     const runId = options.createRunId?.() || `run_${randomUUID()}`
@@ -134,13 +154,32 @@ export const createEditPageHandler = (options: {
         model: options.env.AI_PLANNING_MODEL || model
       })
     })
+    const pendingIntegritySecret = getPendingTaskSecret(options.env.AI_PENDING_TASK_SECRET)
+    const pendingValidation = verifyPendingTask(body.pendingTask, pendingIntegritySecret)
+    const verifiedPendingTask = pendingValidation.valid ? pendingValidation.task : null
+    const pageIds = new Set(page.components.map((component) => component.id))
+    const inputPendingTask = verifiedPendingTask
+      && verifiedPendingTask.pageId === page.id
+      && verifiedPendingTask.pageRevision === baseRevision
+      && [...verifiedPendingTask.targetComponentIds, ...verifiedPendingTask.candidateComponentIds].every((id) => pageIds.has(id))
+      ? verifiedPendingTask
+      : null
+    if (body.pendingTask != null && !inputPendingTask) {
+      console.warn(JSON.stringify({
+        event: 'ai_pending_task_rejected',
+        runId,
+        reason: pendingValidation.valid ? 'page_or_component_mismatch' : pendingValidation.reason
+      }))
+    }
     const output = await agent.invoke(createInitialPageEditState({
       runId,
       request: message,
       page,
       baseRevision,
       recentMessages: messagesFrom(body.recentMessages),
-      conversationMemory: memoryFrom(body.conversationMemory)
+      conversationMemory: memoryFrom(body.conversationMemory),
+      pendingTask: inputPendingTask,
+      pendingIntegritySecret
     }), { signal: controller.signal })
     if (controller.signal.aborted) return
     const result = output.result
@@ -154,13 +193,20 @@ export const createEditPageHandler = (options: {
       reason: (routingState.routingReason || '').slice(0, 300),
       routingTrace: routingState.routingTrace || [],
       outcome: result?.type || 'empty_result',
-      errorCode: result?.type === 'error' ? result.code : null,
+      errorCode: result?.type === 'execution_failed' ? result.code : null,
+      clarificationSource: result?.type === 'clarification_requested' ? result.pendingTask.clarification.source : null,
+      clarificationCode: result?.type === 'clarification_requested' ? result.pendingTask.clarification.code : null,
+      validationError: (routingState.validationError || '').slice(0, 1000),
+      serverVersion: AI_EDIT_SERVER_VERSION,
+      pendingReceived: Boolean(inputPendingTask),
+      pendingCode: inputPendingTask?.clarification.code || null,
+      pendingTaskId: inputPendingTask?.taskId || null,
+      geometryRepairAttempt: routingState.geometryRepairAttempt || 0,
+      needsRelocate: routingState.needsRelocate || false,
       durationMs: Date.now() - Date.parse(routingState.startedAt || new Date().toISOString())
     }))
     if (!result) {
       stream.send({ type: 'error', runId, code: 'EMPTY_AGENT_RESULT', message: 'AI 编辑流程结束但未产生结果。' })
-    } else if (result.type === 'error') {
-      stream.send({ type: 'error', runId, code: result.code, message: result.message })
     } else {
       stream.send({ type: 'success', runId, result, attempts: 1 })
     }

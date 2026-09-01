@@ -6,6 +6,7 @@ import { compactStructuredValue, strictResponseFormat } from '../../structuredSc
 import { createFullRelayoutGroups } from '../context/fullRelayoutGroups'
 import { createLocalEditGraph, type LocalEditGraphDependencies } from './localEditGraph'
 import { PageEditState, type PageEditStateUpdate, type PageEditStateValue } from './pageEditState'
+import { deleteTargetIdsFor } from './editSemanticAnalysis'
 
 export interface FullRelayoutGraphDependencies extends LocalEditGraphDependencies {}
 
@@ -34,7 +35,8 @@ const createPlanNode = (dependencies: FullRelayoutGraphDependencies) => async (
         {
           role: 'user',
           content: JSON.stringify({
-            request: state.originalRequest,
+            request: state.request,
+            task: state.task,
             componentCount: state.draftPage.components.length,
             componentIndex: state.draftPage.components.map((item) => ({ id: item.id, type: item.type, name: item.name }))
           })
@@ -52,7 +54,8 @@ const createPlanNode = (dependencies: FullRelayoutGraphDependencies) => async (
     const groups = createFullRelayoutGroups(state.draftPage)
     return {
       relayoutGroups: groups.map((group) => group.componentIds),
-      relayoutAllowDeletion: value.allowDeletion,
+      relayoutAllowDeletion: Boolean(state.executionPolicy?.allowDelete)
+        && (deleteTargetIdsFor(state.task).length > 0 || value.allowDeletion),
       relayoutSummary: value.summary.trim().slice(0, 300),
       stepIndex: 0,
       status: 'running'
@@ -61,8 +64,8 @@ const createPlanNode = (dependencies: FullRelayoutGraphDependencies) => async (
     return {
       status: 'error',
       result: {
-        type: 'error', runId: state.runId, code: 'FULL_RELAYOUT_PLAN_FAILED',
-        message: error instanceof Error ? error.message : '无法生成整页重构计划。'
+        type: 'execution_failed', runId: state.runId, code: 'FULL_RELAYOUT_PLAN_FAILED',
+        message: error instanceof Error ? error.message : '无法生成整页重构计划。', retryable: true, pendingTask: state.pendingTask
       }
     }
   }
@@ -74,13 +77,13 @@ export const createFullRelayoutGraph = (dependencies: FullRelayoutGraphDependenc
   const executeGroupNode = async (state: PageEditStateValue, config?: RunnableConfig): Promise<PageEditStateUpdate> => {
     const componentIds = state.relayoutGroups[state.stepIndex]
     if (!componentIds?.length) {
-      return { status: 'error', result: { type: 'error', runId: state.runId, code: 'MISSING_RELAYOUT_GROUP', message: '整页重构分组缺失。' } }
+      return { status: 'error', result: { type: 'execution_failed', runId: state.runId, code: 'MISSING_RELAYOUT_GROUP', message: '整页重构分组缺失。', retryable: true, pendingTask: state.pendingTask } }
     }
     const output = await localGraph.invoke({
       ...state,
-      request: `${state.originalRequest}\n当前为确定性分组 ${state.stepIndex + 1}/${state.relayoutGroups.length}，只处理这些稳定 ID：${componentIds.join(', ')}。`,
+      request: `${state.request}\n当前为确定性分组 ${state.stepIndex + 1}/${state.relayoutGroups.length}，只处理这些稳定 ID：${componentIds.join(', ')}。`,
       selectedComponentIds: componentIds,
-      operationLimit: 8,
+      operationLimit: Math.min(8, state.executionPolicy?.operationLimit || 12),
       status: 'running',
       currentPatch: null,
       previousPatch: null,
@@ -88,15 +91,31 @@ export const createFullRelayoutGraph = (dependencies: FullRelayoutGraphDependenc
       modelAttempt: 0,
       repairAttempt: 0,
       noOpRetry: 0,
+      geometryRepairAttempt: 0,
+      needsRelocate: false,
+      clarificationProposals: [],
+      executionCheckpoint: null,
       result: null
     }, config)
+    if (output.clarificationProposals.length) {
+      return {
+        draftPage: output.draftPage,
+        operationCount: output.operationCount,
+        warnings: output.warnings,
+        clarificationProposals: output.clarificationProposals,
+        executionCheckpoint: output.executionCheckpoint,
+        task: output.task,
+        status: 'running',
+        result: null
+      }
+    }
     if (output.result?.type !== 'page_edit_completed') {
       return {
         draftPage: output.draftPage,
         operationCount: output.operationCount,
         warnings: output.warnings,
         status: output.status,
-        result: output.result || { type: 'error', runId: state.runId, code: 'RELAYOUT_GROUP_FAILED', message: '整页重构分组执行失败。' }
+        result: output.result || { type: 'execution_failed', runId: state.runId, code: 'RELAYOUT_GROUP_FAILED', message: '整页重构分组执行失败。', retryable: true, pendingTask: state.pendingTask }
       }
     }
     return {
@@ -105,6 +124,16 @@ export const createFullRelayoutGraph = (dependencies: FullRelayoutGraphDependenc
       warnings: output.warnings,
       stepIndex: state.stepIndex + 1,
       status: 'running',
+      currentPatch: null,
+      previousPatch: null,
+      validationError: null,
+      modelAttempt: 0,
+      repairAttempt: 0,
+      noOpRetry: 0,
+      geometryRepairAttempt: 0,
+      needsRelocate: false,
+      clarificationProposals: [],
+      executionCheckpoint: null,
       result: null
     }
   }
@@ -124,8 +153,10 @@ export const createFullRelayoutGraph = (dependencies: FullRelayoutGraphDependenc
       return {
         status: 'error',
         result: {
-          type: 'error', runId: state.runId, code: 'FULL_PAGE_GEOMETRY_FAILED',
-          message: `整页最终校验失败，未提交任何修改：${error instanceof Error ? error.message : '未知错误'}`
+          type: 'execution_failed', runId: state.runId, code: 'FULL_PAGE_GEOMETRY_FAILED',
+          message: `整页最终校验失败，未提交任何修改：${error instanceof Error ? error.message : '未知错误'}`,
+          retryable: true,
+          pendingTask: state.pendingTask
         }
       }
     }
@@ -135,10 +166,12 @@ export const createFullRelayoutGraph = (dependencies: FullRelayoutGraphDependenc
     .addNode('planRelayout', createPlanNode(dependencies))
     .addNode('executeGroup', executeGroupNode)
     .addNode('finalize', finalizeNode)
-    .addEdge(START, 'planRelayout')
-    .addConditionalEdges('planRelayout', (state) => state.result ? 'done' : 'execute', { done: END, execute: 'executeGroup' })
+    .addConditionalEdges(START, (state) => (
+      state.executionCheckpoint?.branch === 'full_relayout' && state.relayoutGroups.length ? 'resume' : 'plan'
+    ), { resume: 'executeGroup', plan: 'planRelayout' })
+    .addConditionalEdges('planRelayout', (state) => state.result || state.clarificationProposals.length ? 'done' : 'execute', { done: END, execute: 'executeGroup' })
     .addConditionalEdges('executeGroup', (state) => {
-      if (state.result) return 'done'
+      if (state.result || state.clarificationProposals.length) return 'done'
       return state.stepIndex < state.relayoutGroups.length ? 'next' : 'finalize'
     }, { done: END, next: 'executeGroup', finalize: 'finalize' })
     .addEdge('finalize', END)
