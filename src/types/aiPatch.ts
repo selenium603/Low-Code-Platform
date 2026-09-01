@@ -66,16 +66,13 @@ export interface AIEditActionScope {
   targetScope: 'page' | 'components'
   componentTypes: ComponentType[]
   targetComponentIds: string[]
+  candidateComponentIds: string[]
 }
 
 export type AIClarificationSource =
-  | 'rule_router'
-  | 'context_router'
-  | 'tool_router'
   | 'component_locator'
   | 'semantic_analyzer'
   | 'patch_generator'
-  | 'large_edit_planner'
   | 'geometry_validator'
 
 export type AIClarificationCode =
@@ -94,16 +91,14 @@ export interface AIEditTaskState {
   intent: 'local_edit' | 'large_edit' | 'full_relayout'
   rootRequest: string
   additionalInstructions: string[]
-  targetComponentIds: string[]
-  candidateComponentIds: string[]
-  actionScopes?: AIEditActionScope[]
+  actionScopes: AIEditActionScope[]
   clarificationUsed: 0 | 1
   resumedFromPending: boolean
   delegatedToModel: boolean
 }
 
 export interface AIPendingTask {
-  schemaVersion: 2
+  schemaVersion: 3
   taskId: string
   pageId: string
   pageRevision: number
@@ -111,9 +106,7 @@ export interface AIPendingTask {
   taskIntent: 'local_edit' | 'large_edit' | 'full_relayout'
   rootRequest: string
   additionalInstructions: string[]
-  targetComponentIds: string[]
-  candidateComponentIds: string[]
-  actionScopes?: AIEditActionScope[]
+  actionScopes: AIEditActionScope[]
   clarification: {
     used: 1
     max: 1
@@ -127,13 +120,13 @@ export interface AIPendingTask {
 export type AutonomousFallback =
   | { kind: 'select_best_candidate'; orderedCandidateIds: string[]; evidence: Array<'stable_id' | 'exact_name' | 'exact_text' | 'unique_type' | 'rag' | 'lexical' | 'spatial_order'> }
   | { kind: 'use_model_defaults'; allowedComponentIds: string[] }
-  | { kind: 'use_conservative_plan'; maxSteps: 2 | 3 | 4; operationLimit: number }
+  | { kind: 'limit_execution'; operationLimit: number }
   | { kind: 'limit_geometry_scope'; allowedComponentIds: string[]; maxAffectedComponents: 12 }
   | { kind: 'return_no_change'; message: string }
 
 export interface ClarificationProposal {
   proposalId: string
-  source: 'router' | 'semantic_analyzer' | 'component_locator' | 'large_edit_planner' | 'patch_generator' | 'geometry_validator'
+  source: 'semantic_analyzer' | 'component_locator' | 'patch_generator' | 'geometry_validator'
   code: AIBusinessClarificationCode
   question: string
   blocking: boolean
@@ -150,7 +143,15 @@ export interface ExecutionPolicy {
   allowRegionalRelayout: boolean
   maxAffectedComponents: number
   operationLimit: number
-  maxPlanSteps: number
+}
+
+export interface ExecutionUnit {
+  id: string
+  actionIds: string[]
+  componentIds: string[]
+  allowAdd: boolean
+  allowPageStyle: boolean
+  operationBudget: number
 }
 
 export interface DeleteAuthorization {
@@ -167,24 +168,9 @@ export interface UserAuthorizationEvidence {
 export interface PendingConfirmationEvidence {
   clarificationCode: AIBusinessClarificationCode
   clarificationSource: AIClarificationSource
-  signedTargetComponentIds: string[]
-  signedCandidateComponentIds: string[]
+  signedActionScopes: AIEditActionScope[]
   relation: PendingRelation
   rawUserReply: string
-}
-
-export interface ExecutionCheckpoint {
-  branch: 'local_edit' | 'large_edit' | 'full_relayout'
-  resumeNode: 'locate' | 'plan_step' | 'relayout_group' | 'generate_patch' | 'apply_patch' | 'finalize'
-  stepIndex: number
-  groupIndex: number
-  modelAttempt: number
-  repairAttempt: number
-  noOpRetry: number
-  geometryRepairAttempt: number
-  needsRelocate: boolean
-  previousPatch: AIPagePatch | null
-  validationError: string | null
 }
 
 export interface AIConversationSession {
@@ -257,22 +243,6 @@ export interface AIClarification {
   clarificationCode: AIClarificationCode
 }
 
-export interface AIPageEditPlanStep {
-  id: string
-  title: string
-  instruction: string
-  scope: 'page' | 'components'
-  operationBudget: number
-  actionIds?: string[]
-}
-
-export interface AIPageEditPlan {
-  type: 'page_edit_plan'
-  planId: string
-  summary: string
-  steps: AIPageEditPlanStep[]
-}
-
 export interface AIPageEditCompleted {
   type: 'page_edit_completed'
   runId: string
@@ -329,7 +299,7 @@ export type PageEditGraphResult =
   | AINoChange
   | AIExecutionFailed
 
-export type AIEditResponse = AIPagePatch | AIClarification | AIPageEditPlan | PageEditGraphResult
+export type AIEditResponse = AIPagePatch | AIClarification | PageEditGraphResult
 
 export interface AIEditRequest {
   message: string

@@ -1,7 +1,8 @@
 import type { RunnableConfig } from '@langchain/core/runnables'
 import { END, START, StateGraph } from '@langchain/langgraph'
 
-import type { ModelRoutingDecision, NormalizedRoutingDecision } from '../../../src/types/aiPatch'
+import { ComponentType } from '../../../src/types'
+import type { AIEditActionScope, ModelRoutingDecision } from '../../../src/types/aiPatch'
 import { createAnswerQuestionNode } from './answerQuestion'
 import {
   createProposal,
@@ -9,15 +10,12 @@ import {
   rankComponentCandidates
 } from './autonomousFallback'
 import { clarificationBroker } from './clarificationBroker'
-import { createFullRelayoutGraph, type FullRelayoutGraphDependencies } from './fullRelayoutGraph'
 import { classifyPageEditIntent } from './intentRouter'
-import { createLargeEditGraph, type LargeEditGraphDependencies } from './largeEditGraph'
-import { createLocalEditGraph } from './localEditGraph'
-import { createContextIntentNode, createToolIntentNode, type ModelIntentRouterDependencies } from './modelIntentRouter'
+import { createContextIntentNode, type ModelIntentRouterDependencies } from './modelIntentRouter'
 import { hasEffectivePageChange } from './pageChange'
 import { PageEditState, type PageEditStateUpdate, type PageEditStateValue } from './pageEditState'
 import { deriveExecutionPolicy } from './executionPolicy'
-import { analyzeEditActions, isPureAddRequest } from './editActionAnalysis'
+import { analyzeEditActions, detectComponentTypes, isPureAddRequest } from './editActionAnalysis'
 import {
   contextTargetIdsFor,
   createEditSemanticAnalysisNode
@@ -25,8 +23,10 @@ import {
 import { buildAIComponentIndex } from '../context/componentIndex'
 import { normalizeRoutingDecision, pendingQuickRelation } from './routingDecision'
 import { effectiveTaskRequest, reduceTaskState } from './taskReducer'
+import { createExecutionUnits } from './executionUnits'
+import { createUnitExecutorGraph, type UnitExecutorDependencies } from './unitExecutorGraph'
 
-export interface PageEditAgentDependencies extends FullRelayoutGraphDependencies, LargeEditGraphDependencies, ModelIntentRouterDependencies {}
+export interface PageEditAgentDependencies extends UnitExecutorDependencies, ModelIntentRouterDependencies {}
 
 const isVagueImageAddition = (request: string) => (
   isPureAddRequest(request)
@@ -36,9 +36,7 @@ const isVagueImageAddition = (request: string) => (
 )
 
 export const createPageEditAgent = (dependencies: PageEditAgentDependencies) => {
-  const localGraph = createLocalEditGraph(dependencies)
-  const largeGraph = createLargeEditGraph(dependencies)
-  const fullGraph = createFullRelayoutGraph(dependencies)
+  const unitExecutor = createUnitExecutorGraph(dependencies)
   const invoke = (graph: { invoke(state: PageEditStateValue, config?: RunnableConfig): Promise<PageEditStateValue> }) => (
     state: PageEditStateValue,
     config?: RunnableConfig
@@ -101,7 +99,7 @@ export const createPageEditAgent = (dependencies: PageEditAgentDependencies) => 
     }
   }
 
-  const normalizeRoutingNode = (state: PageEditStateValue): PageEditStateUpdate => {
+  const materializeTaskNode = (state: PageEditStateValue): PageEditStateUpdate => {
     if (!state.routingDecision || !state.routingSource) {
       return {
         status: 'error',
@@ -120,20 +118,9 @@ export const createPageEditAgent = (dependencies: PageEditAgentDependencies) => 
       currentRevision: state.baseRevision,
       existingComponentIds: new Set(state.draftPage.components.map((component) => component.id))
     })
-    return {
-      routingDecision: normalized.decision,
-      pendingTask: normalized.pendingTask,
-      intent: normalized.decision.intent,
-      routingReason: normalized.decision.reason
-    }
-  }
-
-  const reduceTaskNode = (state: PageEditStateValue): PageEditStateUpdate => {
-    const decision = state.routingDecision as NormalizedRoutingDecision | null
-    if (!decision) return {}
     const reduction = reduceTaskState({
-      decision,
-      pendingTask: state.pendingTask,
+      decision: normalized.decision,
+      pendingTask: normalized.pendingTask,
       message: state.originalRequest,
       pageId: state.pageId,
       pageRevision: state.baseRevision
@@ -171,18 +158,73 @@ export const createPageEditAgent = (dependencies: PageEditAgentDependencies) => 
         additionalUserMessages: [...reduction.task.additionalInstructions]
       },
       pendingConfirmationEvidence: reduction.pendingConfirmationEvidence,
-      selectedComponentIds: [...reduction.task.targetComponentIds],
+      selectedComponentIds: contextTargetIdsFor(reduction.task),
       clarificationProposals: [],
       appliedFallbacks: reduction.resumeFallbacks,
       result: null
     }
   }
 
-  const preflightNode = (state: PageEditStateValue): PageEditStateUpdate => {
-    if (!state.task) return {}
+  const prepareExecutionNode = (state: PageEditStateValue): PageEditStateUpdate => {
+    if (!state.task || !state.authorizationEvidence) return {}
+    const componentIndex = buildAIComponentIndex(state.originalPage)
+    const typeById = new Map(componentIndex.map((component) => [component.id, component.type as ComponentType]))
     const proposals = []
     let task = state.task
-    if (isVagueImageAddition(state.task.rootRequest)) {
+
+    if (!task.actionScopes.length) {
+      const analysis = analyzeEditActions(state.request)
+      const positiveDelete = analysis.mentions.filter((mention) => mention.kind === 'delete' && !mention.negated)
+      const positiveReplace = analysis.mentions.filter((mention) => mention.kind === 'replace' && !mention.negated)
+      if (analysis.isPureAdd) {
+        task = {
+          ...task,
+          actionScopes: [{
+            actionId: 'add-1',
+            kind: 'add',
+            instruction: state.request.slice(0, 500),
+            targetScope: 'page',
+            componentTypes: analysis.positiveAddTypes,
+            targetComponentIds: [],
+            candidateComponentIds: []
+          }]
+        }
+      } else if (/(?:页面|画布).{0,8}(?:背景|颜色|宽度|高度|尺寸)|(?:页面背景|画布背景)/i.test(state.request)) {
+        task = {
+          ...task,
+          actionScopes: [{
+            actionId: 'page-update-1',
+            kind: 'update',
+            instruction: state.request.slice(0, 500),
+            targetScope: 'page',
+            componentTypes: [],
+            targetComponentIds: [],
+            candidateComponentIds: []
+          }]
+        }
+      } else {
+        const kind: AIEditActionScope['kind'] = positiveDelete.length
+          ? 'delete'
+          : positiveReplace.length ? 'replace' : 'update'
+        const hintedTypes = kind === 'delete'
+          ? [...new Set(positiveDelete.flatMap((mention) => mention.componentTypes))]
+          : detectComponentTypes(state.request)
+        task = {
+          ...task,
+          actionScopes: [{
+            actionId: `${kind}-1`,
+            kind,
+            instruction: state.request.slice(0, 500),
+            targetScope: 'components',
+            componentTypes: hintedTypes,
+            targetComponentIds: [],
+            candidateComponentIds: []
+          }]
+        }
+      }
+    }
+
+    if (isVagueImageAddition(task.rootRequest) && !task.delegatedToModel) {
       proposals.push(createProposal({
         source: 'component_locator',
         code: 'MISSING_EXECUTION_DATA',
@@ -194,57 +236,94 @@ export const createPageEditAgent = (dependencies: PageEditAgentDependencies) => 
       }))
     }
 
-    const actionAnalysis = analyzeEditActions(state.request)
-    const positiveDelete = actionAnalysis.mentions.filter((mention) => mention.kind === 'delete' && !mention.negated)
-    const hasDeleteRejection = actionAnalysis.mentions.some((mention) => mention.kind === 'delete' && mention.negated)
-    if (positiveDelete.length && !hasDeleteRejection && !task.targetComponentIds.length && !task.actionScopes?.length) {
-      const componentIndex = buildAIComponentIndex(state.draftPage)
-      const hintedTypes = new Set(positiveDelete.flatMap((mention) => mention.componentTypes))
-      const candidates = hintedTypes.size
-        ? componentIndex.filter((candidate) => hintedTypes.has(candidate.type as never))
-        : componentIndex
-      const requestsAll = /(?:全部|所有|每个).{0,8}(?:组件|按钮|图片|图像|文本|标题|表单|图表|输入框)/i.test(state.request)
+    const requestsAll = /(?:全部|所有|每个).{0,8}(?:组件|按钮|图片|图像|文本|标题|表单|图表|输入框)/i.test(state.request)
+    const actionScopes = task.actionScopes.map((action) => {
+      if (action.targetScope === 'page' || action.targetComponentIds.length) return action
+      const signedCandidates = action.candidateComponentIds.length
+        ? new Set(action.candidateComponentIds)
+        : null
+      const candidates = componentIndex.filter((candidate) => (
+        (!signedCandidates || signedCandidates.has(candidate.id))
+        && (!action.componentTypes.length || action.componentTypes.includes(candidate.type as ComponentType))
+      ))
       const ranked = rankComponentCandidates(state.request, candidates)
       const best = ranked[0]
       const runnerUp = ranked[1]
       const hasUniqueEvidence = Boolean(best?.evidence.some((evidence) => (
         evidence === 'stable_id' || evidence === 'exact_name' || evidence === 'exact_text' || evidence === 'unique_type'
       ))) && (!runnerUp || best!.score > runnerUp.score)
-      const targetIds = requestsAll && candidates.length <= 12
+      const targetComponentIds = requestsAll && candidates.length > 0 && candidates.length <= 12
         ? candidates.map((candidate) => candidate.id)
         : hasUniqueEvidence && best ? [best.id] : []
-      if (targetIds.length) {
-        task = {
-          ...task,
-          candidateComponentIds: [],
-          actionScopes: [{
-            actionId: 'delete-1',
-            kind: 'delete',
-            instruction: state.request.slice(0, 500),
-            targetScope: 'components',
-            componentTypes: [...hintedTypes],
-            targetComponentIds: targetIds
-          }]
+      if (targetComponentIds.length) {
+        return {
+          ...action,
+          componentTypes: [...new Set(targetComponentIds.map((id) => typeById.get(id)!).filter(Boolean))],
+          targetComponentIds,
+          candidateComponentIds: []
         }
-      } else {
-        const fallback = fallbackForAmbiguousCandidates(state.request, candidates)
-        task = { ...task, candidateComponentIds: ranked.slice(0, 12).map((candidate) => candidate.id) }
-        proposals.push(createProposal({
-          source: 'router',
-          code: 'TARGET_AMBIGUOUS',
-          question: '请说明需要删除的具体组件名称、当前文案或所在区域。',
-          blocking: true,
-          hasSafeFallback: fallback.kind === 'select_best_candidate' && fallback.orderedCandidateIds.length > 0,
-          affectedComponentCount: candidates.length,
-          fallback
-        }))
+      }
+      const candidateComponentIds = ranked.slice(0, 12).map((candidate) => candidate.id)
+      const fallback = fallbackForAmbiguousCandidates(state.request, candidates)
+      proposals.push(createProposal({
+        source: 'component_locator',
+        code: 'TARGET_AMBIGUOUS',
+        question: action.kind === 'delete'
+          ? '请说明需要删除的具体组件名称、当前文案或所在区域。'
+          : '请说明需要修改的具体组件名称、当前文案或所在区域。',
+        blocking: true,
+        hasSafeFallback: fallback.kind === 'select_best_candidate' && fallback.orderedCandidateIds.length > 0,
+        affectedComponentCount: candidates.length,
+        fallback
+      }))
+      return { ...action, candidateComponentIds }
+    })
+    task = { ...task, actionScopes }
+
+    const executionPolicy = deriveExecutionPolicy({
+      task,
+      authorizationEvidence: state.authorizationEvidence,
+      appliedFallbacks: state.appliedFallbacks,
+      pendingConfirmationEvidence: state.pendingConfirmationEvidence
+    })
+    const executionUnits = createExecutionUnits({ task, page: state.originalPage, policy: executionPolicy })
+    if (!proposals.length && !executionUnits.length) {
+      return {
+        task,
+        executionPolicy,
+        status: 'error',
+        result: {
+          type: 'execution_failed', runId: state.runId, code: 'MISSING_EXECUTION_UNITS',
+          message: '服务端无法为当前任务生成安全的 Execution Units。', retryable: true, pendingTask: state.pendingTask
+        }
       }
     }
-
+    const currentUnitId = state.executionUnits[state.unitIndex]?.id
+    const matchedUnitIndex = currentUnitId
+      ? executionUnits.findIndex((unit) => unit.id === currentUnitId)
+      : -1
+    const resumedUnitIndex = state.brokerPass > 0
+      ? matchedUnitIndex >= 0
+        ? matchedUnitIndex
+        : Math.min(state.unitIndex, Math.max(0, executionUnits.length - 1))
+      : 0
     return {
       task,
-      selectedComponentIds: task.actionScopes?.length ? contextTargetIdsFor(task) : [...task.targetComponentIds],
-      clarificationProposals: proposals
+      selectedComponentIds: contextTargetIdsFor(task),
+      clarificationProposals: proposals,
+      executionPolicy,
+      executionUnits,
+      unitIndex: resumedUnitIndex,
+      unitSummaries: state.brokerPass > 0 ? state.unitSummaries : [],
+      operationLimit: Math.min(12, executionPolicy.operationLimit),
+      currentPatch: null,
+      previousPatch: null,
+      validationError: null,
+      modelAttempt: 0,
+      repairAttempt: 0,
+      noOpRetry: 0,
+      geometryRepairAttempt: 0,
+      needsRelocate: false
     }
   }
 
@@ -286,48 +365,43 @@ export const createPageEditAgent = (dependencies: PageEditAgentDependencies) => 
     const selection = decision.appliedFallbacks.find((fallback) => fallback.kind === 'select_best_candidate')
     const geometry = decision.appliedFallbacks.find((fallback) => fallback.kind === 'limit_geometry_scope')
     const useDefaults = decision.appliedFallbacks.some((fallback) => fallback.kind === 'use_model_defaults')
-    const targetIds = selection?.kind === 'select_best_candidate'
-      ? selection.orderedCandidateIds.slice(0, 1)
-      : geometry?.kind === 'limit_geometry_scope'
-        ? geometry.allowedComponentIds.slice(0, geometry.maxAffectedComponents)
-        : state.task.targetComponentIds
-    const selectedDeleteIds = selection?.kind === 'select_best_candidate'
-      && analyzeEditActions(state.request).mentions.some((mention) => mention.kind === 'delete' && !mention.negated)
-      ? targetIds
-      : []
-    const actionScopes = selectedDeleteIds.length && !state.task.actionScopes?.length
-      ? [{
-          actionId: 'delete-1', kind: 'delete' as const, instruction: state.request.slice(0, 500),
-          targetScope: 'components' as const, componentTypes: [], targetComponentIds: selectedDeleteIds
-        }]
-      : state.task.actionScopes
+    let actionScopes = state.task.actionScopes
+    if (selection?.kind === 'select_best_candidate') {
+      const selectedIds = selection.orderedCandidateIds.slice(0, 1)
+      const unresolvedIndex = actionScopes.findIndex((action) => (
+        !action.targetComponentIds.length && action.candidateComponentIds.length
+      ))
+      if (unresolvedIndex >= 0 && selectedIds.length) {
+        actionScopes = actionScopes.map((action, index) => index === unresolvedIndex
+          ? { ...action, targetComponentIds: selectedIds, candidateComponentIds: [] }
+          : action)
+      }
+    }
+    if (geometry?.kind === 'limit_geometry_scope') {
+      const geometryIds = geometry.allowedComponentIds.slice(0, geometry.maxAffectedComponents)
+      const updateIndex = actionScopes.findIndex((action) => action.kind === 'update' && action.targetScope === 'components')
+      actionScopes = updateIndex >= 0
+        ? actionScopes.map((action, index) => index === updateIndex
+            ? { ...action, targetComponentIds: [...new Set([...action.targetComponentIds, ...geometryIds])] }
+            : action)
+        : [...actionScopes, {
+            actionId: 'geometry-repair', kind: 'update' as const,
+            instruction: '在用户授权的局部范围内修复几何冲突。', targetScope: 'components' as const,
+            componentTypes: [], targetComponentIds: geometryIds, candidateComponentIds: []
+          }]
+    }
     return {
       task: {
         ...state.task,
-        targetComponentIds: actionScopes?.length ? state.task.targetComponentIds : targetIds,
         actionScopes,
         delegatedToModel: state.task.delegatedToModel || useDefaults
       },
-      selectedComponentIds: actionScopes?.length ? contextTargetIdsFor({ ...state.task, actionScopes }) : targetIds,
+      selectedComponentIds: contextTargetIdsFor({ actionScopes }),
       appliedFallbacks: [...state.appliedFallbacks, ...decision.appliedFallbacks],
       handledProposalIds: [...new Set([...state.handledProposalIds, ...state.clarificationProposals.map((proposal) => proposal.proposalId)])],
       clarificationProposals: [],
       brokerPass: state.brokerPass + 1,
       result: null
-    }
-  }
-
-  const derivePolicyNode = (state: PageEditStateValue): PageEditStateUpdate => {
-    if (!state.task || !state.authorizationEvidence) return {}
-    const executionPolicy = deriveExecutionPolicy({
-      task: state.task,
-      authorizationEvidence: state.authorizationEvidence,
-      appliedFallbacks: state.appliedFallbacks,
-      pendingConfirmationEvidence: state.pendingConfirmationEvidence
-    })
-    return {
-      executionPolicy,
-      operationLimit: Math.min(12, executionPolicy.operationLimit)
     }
   }
 
@@ -349,30 +423,21 @@ export const createPageEditAgent = (dependencies: PageEditAgentDependencies) => 
   return new StateGraph(PageEditState)
     .addNode('ruleIntent', ruleIntentNode)
     .addNode('contextIntent', createContextIntentNode(dependencies))
-    .addNode('toolIntent', createToolIntentNode(dependencies))
-    .addNode('normalizeRouting', normalizeRoutingNode)
-    .addNode('reduceTask', reduceTaskNode)
+    .addNode('materializeTask', materializeTaskNode)
     .addNode('analyzeActions', createEditSemanticAnalysisNode(dependencies))
     .addNode('answerQuestion', createAnswerQuestionNode(dependencies))
-    .addNode('preflight', preflightNode)
+    .addNode('prepareExecution', prepareExecutionNode)
     .addNode('broker', brokerNode)
-    .addNode('derivePolicy', derivePolicyNode)
-    .addNode('localEdit', invoke(localGraph))
-    .addNode('largeEdit', invoke(largeGraph))
-    .addNode('fullRelayout', invoke(fullGraph))
+    .addNode('executeUnits', invoke(unitExecutor))
     .addNode('verifyEffectiveChange', verifyEffectiveChange)
     .addEdge(START, 'ruleIntent')
-    .addConditionalEdges('ruleIntent', (state) => state.routingDecision ? 'normalize' : 'context', {
-      normalize: 'normalizeRouting', context: 'contextIntent'
+    .addConditionalEdges('ruleIntent', (state) => state.routingDecision ? 'materialize' : 'context', {
+      materialize: 'materializeTask', context: 'contextIntent'
     })
-    .addConditionalEdges('contextIntent', (state) => state.routingDecision ? 'normalize' : 'tool', {
-      normalize: 'normalizeRouting', tool: 'toolIntent'
+    .addConditionalEdges('contextIntent', (state) => state.result ? 'done' : 'materialize', {
+      done: END, materialize: 'materializeTask'
     })
-    .addConditionalEdges('toolIntent', (state) => state.result ? 'done' : 'normalize', {
-      done: END, normalize: 'normalizeRouting'
-    })
-    .addEdge('normalizeRouting', 'reduceTask')
-    .addConditionalEdges('reduceTask', (state) => {
+    .addConditionalEdges('materializeTask', (state) => {
       if (state.result) return 'done'
       if (state.intent === 'question' || state.intent === 'chat') return 'qa'
       return 'edit'
@@ -380,21 +445,17 @@ export const createPageEditAgent = (dependencies: PageEditAgentDependencies) => 
     .addEdge('answerQuestion', END)
     .addConditionalEdges('analyzeActions', (state) => {
       if (state.result) return 'done'
-      return state.clarificationProposals.length ? 'broker' : 'preflight'
-    }, { done: END, broker: 'broker', preflight: 'preflight' })
-    .addConditionalEdges('preflight', (state) => state.clarificationProposals.length ? 'broker' : 'policy', {
-      broker: 'broker', policy: 'derivePolicy'
+      return state.clarificationProposals.length ? 'broker' : 'prepare'
+    }, { done: END, broker: 'broker', prepare: 'prepareExecution' })
+    .addConditionalEdges('prepareExecution', (state) => state.result ? 'done' : state.clarificationProposals.length ? 'broker' : 'execute', {
+      done: END, broker: 'broker', execute: 'executeUnits'
     })
-    .addConditionalEdges('broker', (state) => state.result ? 'done' : 'policy', {
-      done: END, policy: 'derivePolicy'
+    .addConditionalEdges('broker', (state) => state.result ? 'done' : 'prepare', {
+      done: END, prepare: 'prepareExecution'
     })
-    .addConditionalEdges('derivePolicy', (state) => state.intent, {
-      local_edit: 'localEdit', large_edit: 'largeEdit', full_relayout: 'fullRelayout',
-      question: 'answerQuestion', chat: 'answerQuestion', cancel: END, unresolved: END
+    .addConditionalEdges('executeUnits', (state) => state.clarificationProposals.length ? 'broker' : 'verify', {
+      broker: 'broker', verify: 'verifyEffectiveChange'
     })
-    .addConditionalEdges('localEdit', (state) => state.clarificationProposals.length ? 'broker' : 'verify', { broker: 'broker', verify: 'verifyEffectiveChange' })
-    .addConditionalEdges('largeEdit', (state) => state.clarificationProposals.length ? 'broker' : 'verify', { broker: 'broker', verify: 'verifyEffectiveChange' })
-    .addConditionalEdges('fullRelayout', (state) => state.clarificationProposals.length ? 'broker' : 'verify', { broker: 'broker', verify: 'verifyEffectiveChange' })
     .addEdge('verifyEffectiveChange', END)
     .compile()
 }

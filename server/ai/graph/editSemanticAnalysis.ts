@@ -10,6 +10,7 @@ import { analyzeEditActions } from './editActionAnalysis'
 import type { PageEditStateUpdate, PageEditStateValue } from './pageEditState'
 
 type StructuredClient = Pick<OpenRouterClient, 'completeStructured'>
+type ActionScopedTask = Pick<AIEditTaskState, 'actionScopes'>
 
 const PRESERVE_CONSTRAINT = /保留|保持.{0,8}不变|不要动|别动|除了|除去|其余|剩下|(?:不要|别|禁止|不允许).{0,6}(?:删除|移除|删掉|删去|去掉)/
 const SEMANTIC_ADD = /来(?:一|两|几|些|个|张|幅|块|组|套|条|段)/
@@ -42,32 +43,38 @@ export const requiresSemanticActionAnalysis = (request: string) => {
     || (PRESERVE_CONSTRAINT.test(request) && hasScopedMutation)
 }
 
-export const editTargetIdsFor = (task: AIEditTaskState | null | undefined) => [...new Set(
+export const editTargetIdsFor = (task: ActionScopedTask | null | undefined) => [...new Set(
   (task?.actionScopes || [])
     .filter((action) => action.kind === 'update' || action.kind === 'replace')
     .flatMap((action) => action.targetComponentIds)
 )]
 
-export const deleteTargetIdsFor = (task: AIEditTaskState | null | undefined) => [...new Set(
+export const deleteTargetIdsFor = (task: ActionScopedTask | null | undefined) => [...new Set(
   (task?.actionScopes || [])
     .filter((action) => action.kind === 'delete')
     .flatMap((action) => action.targetComponentIds)
 )]
 
-export const preserveTargetIdsFor = (task: AIEditTaskState | null | undefined) => [...new Set(
+export const preserveTargetIdsFor = (task: ActionScopedTask | null | undefined) => [...new Set(
   (task?.actionScopes || [])
     .filter((action) => action.kind === 'preserve')
     .flatMap((action) => action.targetComponentIds)
 )]
 
-export const contextTargetIdsFor = (task: AIEditTaskState | null | undefined) => [...new Set([
+export const contextTargetIdsFor = (task: ActionScopedTask | null | undefined) => [...new Set([
   ...editTargetIdsFor(task),
   ...deleteTargetIdsFor(task),
   ...preserveTargetIdsFor(task)
 ])]
 
-export const taskHasAddAction = (task: AIEditTaskState | null | undefined) => (
+export const taskHasAddAction = (task: ActionScopedTask | null | undefined) => (
   (task?.actionScopes || []).some((action) => action.kind === 'add')
+)
+
+export const taskHasPageEditAction = (task: ActionScopedTask | null | undefined) => (
+  (task?.actionScopes || []).some((action) => (
+    action.targetScope === 'page' && (action.kind === 'update' || action.kind === 'replace')
+  ))
 )
 
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(
@@ -91,8 +98,11 @@ export const createEditSemanticAnalysisNode = (dependencies: { modelClient: Stru
   state: PageEditStateValue,
   config?: RunnableConfig
 ): Promise<PageEditStateUpdate> => {
-  if (!state.task || state.task.actionScopes?.length) return {}
-  if (!requiresSemanticActionAnalysis(state.request) && state.routingSource === 'rule') return {}
+  if (!state.task || state.task.actionScopes.length) return {}
+  if (!requiresSemanticActionAnalysis(state.request)
+    && state.routingSource === 'rule'
+    && state.task.intent !== 'large_edit'
+    && state.task.intent !== 'full_relayout') return {}
 
   const index = buildAIComponentIndex(state.originalPage)
   const knownIds = new Set(index.map((component) => component.id))
@@ -108,7 +118,7 @@ export const createEditSemanticAnalysisNode = (dependencies: { modelClient: Stru
           {
             role: 'system',
             content: `你是页面编辑的复杂动作作用域分析器，只解释用户明确表达的动作和目标，不生成 Patch、页面或执行计划。
-把组合要求拆成 add、update、replace、delete、preserve 动作。preserve 表示不得修改或删除的约束。每个 components 动作只能选择候选中真实存在的稳定 ID；add 使用 page scope 且 componentIds 为空。
+把组合要求拆成 add、update、replace、delete、preserve 动作。preserve 表示不得修改或删除的约束。每个 components 动作只能选择候选中真实存在的稳定 ID；add 使用 page scope 且 componentIds 为空。large_edit 必须拆成 2～6 个可以独立执行、且各自不超过 8 个 Patch 操作的动作，不得再交给后续规划器二次拆分。full_relayout 使用 page scope 的 update/replace 表达整页修改；只有用户明确要求删除时才额外生成 delete action。
 删除动作只能来自用户明确的正向删除要求；“保留/不要删除”不得转换为 delete。不同动作必须保留各自独立目标，例如“删除页脚按钮，并把主标题改红”必须产生两个 action。无法确定唯一目标或数量范围时返回 need_clarification。`
           },
           {
@@ -182,7 +192,8 @@ export const createEditSemanticAnalysisNode = (dependencies: { modelClient: Stru
           componentTypes: targetScope === 'components'
             ? [...new Set(ids.map((id) => typeById.get(id) as ComponentType))]
             : types,
-          targetComponentIds: ids
+          targetComponentIds: ids,
+          candidateComponentIds: []
         }
       })
       const allTargetIds = [...new Set(scopes.flatMap((scope) => scope.targetComponentIds))]
@@ -190,6 +201,10 @@ export const createEditSemanticAnalysisNode = (dependencies: { modelClient: Stru
         throw new Error('语义动作包含重复 actionId。')
       }
       if (allTargetIds.length > 12) throw new Error('组合修改涉及超过 12 个组件。')
+      const executableActions = scopes.filter((scope) => scope.kind !== 'preserve')
+      if (state.task.intent === 'large_edit' && (executableActions.length < 2 || executableActions.length > 6)) {
+        throw new Error('大幅修改必须拆成 2～6 个独立动作。')
+      }
       const preserved = new Set(scopes.filter((scope) => scope.kind === 'preserve').flatMap((scope) => scope.targetComponentIds))
       const conflicts = scopes
         .filter((scope) => scope.kind !== 'preserve')

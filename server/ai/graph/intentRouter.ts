@@ -1,4 +1,3 @@
-import { shouldPlanLargeEdit } from '../../largeEditPlan'
 import type { PageEditIntent } from './pageEditState'
 
 const EDIT_ACTION = /修改|调整|替换|移动|新增|添加|创建|删除|移除|去掉|重构|重新设计|重新布局|重排|排版|布局|美化|优化|统一|改成|改为|换成|变成|变为|设置|放大|缩小|加宽|变窄|上移|下移|左移|右移/i
@@ -17,6 +16,20 @@ const isFullRelayout = (request: string) => (
 )
 
 const hasEditAction = (request: string) => EDIT_ACTION.test(request) || IMPERATIVE_CHANGE.test(request)
+
+const requestedComponentTarget = (request: string) => [...request.matchAll(
+  /(\d+)\s*\+?\s*(?:个)?(?:组件|模块|卡片|元素)/g
+)]
+  .map((match) => Number(match[1]))
+  .filter(Number.isFinite)
+  .sort((first, second) => second - first)[0]
+
+const shouldPlanLargeEdit = (request: string, componentCount: number) => {
+  if ((requestedComponentTarget(request) || 0) >= 13) return true
+  if (/(?:新增|添加|创建|扩充).{0,10}(?:十几|十多|二十|三十|几十|大量|一批|一系列)(?:个)?(?:组件|模块|卡片|元素|区域)/i.test(request)) return true
+  if (/(大幅|大改|大规模|复杂一点|更复杂|丰富.{0,6}(页面|内容)|重新设计|整体重构|整页重构|批量新增|多个(?:区域|模块|分区))/i.test(request)) return true
+  return componentCount > 12 && /(全部|所有|整页|全局).{0,12}(修改|调整|替换|重排|统一)/i.test(request)
+}
 
 export const classifyPageEditIntent = (request: string, componentCount: number): PageEditIntent => {
   const normalized = request.trim()

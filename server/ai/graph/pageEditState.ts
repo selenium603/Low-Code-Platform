@@ -1,7 +1,7 @@
 import { StateSchema } from '@langchain/langgraph'
 import { z } from 'zod'
 
-import type { RagComponentIndexItem } from '../../componentRag'
+import type { RagComponentIndexItem } from '../context/componentIndex'
 import type {
   AIConversationMemory,
   AIConversationMessage,
@@ -9,12 +9,11 @@ import type {
   AIPendingTask,
   AutonomousFallback,
   ClarificationProposal,
-  ExecutionCheckpoint,
+  ExecutionUnit,
   ExecutionPolicy,
   ModelRoutingDecision,
   PageEditGraphResult as SharedPageEditGraphResult,
   PendingConfirmationEvidence,
-  AIPageEditPlan,
   AIPagePatch,
   UserAuthorizationEvidence
 } from '../../../src/types/aiPatch'
@@ -56,7 +55,6 @@ export const PageEditState = new StateSchema({
   pendingConfirmationEvidence: z.custom<PendingConfirmationEvidence>().nullable().default(null),
   clarificationProposals: z.array(z.custom<ClarificationProposal>()).default(() => []),
   appliedFallbacks: z.array(z.custom<AutonomousFallback>()).default(() => []),
-  executionCheckpoint: z.custom<ExecutionCheckpoint>().nullable().default(null),
   brokerPass: z.number().int().min(0).default(0),
   handledProposalIds: z.array(z.string()).default(() => []),
   pendingIntegritySecret: z.string().default(''),
@@ -76,11 +74,9 @@ export const PageEditState = new StateSchema({
   currentPageContext: z.unknown().nullable().default(null),
   allowedOperationKinds: z.array(z.string()).default(() => []),
   operationLimit: z.number().int().min(1).max(12).default(12),
-  plan: z.custom<AIPageEditPlan>().nullable().default(null),
-  relayoutGroups: z.array(z.array(z.string())).default(() => []),
-  relayoutAllowDeletion: z.boolean().default(false),
-  relayoutSummary: z.string().default(''),
-  stepIndex: z.number().int().min(0).default(0),
+  executionUnits: z.array(z.custom<ExecutionUnit>()).default(() => []),
+  unitIndex: z.number().int().min(0).default(0),
+  unitSummaries: z.array(z.string()).default(() => []),
   currentPatch: z.custom<AIPagePatch>().nullable().default(null),
   previousPatch: z.custom<AIPagePatch>().nullable().default(null),
   validationError: z.string().nullable().default(null),

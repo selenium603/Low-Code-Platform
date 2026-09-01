@@ -1,5 +1,21 @@
-import type { RagComponentIndexItem } from '../../componentRag'
 import type { ComponentData, PageData } from '../../../src/types'
+
+export interface RagComponentIndexItem {
+  index: number
+  id: string
+  type: string
+  name: string
+  text?: string
+  desktop: number[]
+  mobile: number[]
+  spatial: { desktop: string; mobile: string }
+  neighborIds: string[]
+}
+
+export interface RagCandidate extends RagComponentIndexItem {
+  ragScore: number
+  ragSignals: string[]
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> => (
   typeof value === 'object' && value !== null && !Array.isArray(value)

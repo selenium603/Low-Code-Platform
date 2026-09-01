@@ -1,6 +1,7 @@
 import type { AIClarification, AIPagePatch } from '../../../src/types/aiPatch'
 import { isPureAddRequest } from './editActionAnalysis'
-import { deleteTargetIdsFor, editTargetIdsFor } from './editSemanticAnalysis'
+import { deleteTargetIdsFor, editTargetIdsFor, taskHasPageEditAction } from './editSemanticAnalysis'
+import { currentExecutionUnit, taskForExecutionUnit } from './executionUnits'
 import type { PageEditStateValue } from './pageEditState'
 
 const businessCodes = new Set(['TARGET_AMBIGUOUS', 'DELETION_AUTH_REQUIRED', 'GEOMETRY_RELAYOUT_AUTH_REQUIRED', 'CONFLICTING_REQUIREMENTS', 'MISSING_EXECUTION_DATA'])
@@ -36,9 +37,11 @@ export const validateGeneratedEditResponse = (
 
   const pageIds = new Set(state.draftPage.components.map((component) => component.id))
   const selectedIds = new Set(state.selectedComponentIds)
-  const hasSemanticScopes = Boolean(state.task?.actionScopes?.length)
-  const scopedEditIds = new Set(editTargetIdsFor(state.task))
-  const scopedDeleteIds = new Set(deleteTargetIdsFor(state.task))
+  const scopedTask = taskForExecutionUnit(state.task, currentExecutionUnit(state))
+  const hasSemanticScopes = Boolean(scopedTask?.actionScopes.length)
+  const scopedEditIds = new Set(editTargetIdsFor(scopedTask))
+  const scopedDeleteIds = new Set(deleteTargetIdsFor(scopedTask))
+  const allowsFullPageComponentEdits = state.intent === 'full_relayout' && taskHasPageEditAction(scopedTask)
   const allowedKinds = new Set(state.allowedOperationKinds)
   const componentOperations = new Set(['updateProps', 'updateStyle', 'placeRelative', 'removeComponent', 'moveLayer'])
   const knownOperations = new Set([
@@ -65,7 +68,7 @@ export const validateGeneratedEditResponse = (
         return { error: `操作 ${kind} 引用了不存在的 componentId。` }
       }
       if (!selectedIds.has(operation.componentId)) return { error: `操作 ${kind} 超出了已授权组件范围。` }
-      if (hasSemanticScopes && kind !== 'removeComponent' && !scopedEditIds.has(operation.componentId)) {
+      if (hasSemanticScopes && !allowsFullPageComponentEdits && kind !== 'removeComponent' && !scopedEditIds.has(operation.componentId)) {
         return { error: `操作 ${kind} 超出了对应修改 action 的授权范围。` }
       }
     }

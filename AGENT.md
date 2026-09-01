@@ -47,7 +47,6 @@ npm install / npm run dev / npm run type-check / npm run build
 - `server/structuredSchemas.ts`：集中维护全部 strict JSON Schema（页面、布局计划、编辑响应、RAG 定位）；`strictResponseFormat`、`compactStructuredValue`（移除值为 null 的可选字段）
 - `server/ai/graph/`：LangGraph 编辑 Agent —— `pageEditAgent.ts`（意图分流：局部/大幅/整页/提问）、`intentRouter.ts`、`localEditGraph.ts`、`largeEditGraph.ts`、`fullRelayoutGraph.ts`、`modelIntentRouter.ts`、`patchPolicy.ts`、`pageEditState.ts`、`pageChange.ts`
 - `server/ai/context/`：`componentIndex.ts`（`buildAIComponentIndex`/`selectLocalPageComponents`）、`fullRelayoutGroups.ts`（整页重构分组）
-- `server/componentRag.ts`：40+ 组件页面的 Embedding+关键词混合检索，失败降级本地关键词
 - `server/largeEditPlan.ts`：大幅修改规划
 - 前端入口：`src/services/aiPage.ts`、`src/services/aiEditPage.ts`
 
@@ -89,7 +88,7 @@ ComponentData: id / type / name / style / props / events / schemaVersion / respo
 
 ## 8. 安全与部署
 
-- 真实 API Key 只放 `.env.local`（参考 `.env.example`：`OPENROUTER_API_KEY`、`AI_MODEL`、`AI_PLANNING_MODEL`、`AI_RAG_ENABLED`、`AI_EMBEDDING_*` 等），禁止进前端 bundle/仓库/文档
+- 真实 API Key 只放 `.env.local`（参考 `.env.example`：`OPENROUTER_API_KEY`、`AI_MODEL`、`AI_PLANNING_MODEL` 等），禁止进前端 bundle/仓库/文档
 - 当前 `/api/ai/*` 是 Vite 开发中间件，不等于生产后端；正式部署需迁移 BFF/Serverless，补鉴权、限流、日志、费用与异常监控
 
 ## 9. 已知边界与技术债

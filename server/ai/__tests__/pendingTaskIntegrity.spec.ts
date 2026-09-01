@@ -4,7 +4,7 @@ import type { AIPendingTask } from '../../../src/types/aiPatch'
 import { signPendingTask, verifyPendingTask } from '../graph/pendingTaskIntegrity'
 
 const unsignedTask = (): Omit<AIPendingTask, 'integrityToken'> => ({
-  schemaVersion: 2,
+  schemaVersion: 3,
   taskId: 'task-1',
   pageId: 'page-1',
   pageRevision: 3,
@@ -12,11 +12,9 @@ const unsignedTask = (): Omit<AIPendingTask, 'integrityToken'> => ({
   taskIntent: 'local_edit',
   rootRequest: '加点图片',
   additionalInstructions: [],
-  targetComponentIds: [],
-  candidateComponentIds: [],
   actionScopes: [{
     actionId: 'add-image', kind: 'add', instruction: '加点图片', targetScope: 'page',
-    componentTypes: [], targetComponentIds: []
+    componentTypes: [], targetComponentIds: [], candidateComponentIds: []
   }],
   clarification: {
     used: 1,
@@ -33,7 +31,7 @@ describe('pendingTask integrity', () => {
     expect(verifyPendingTask(signed, 'test-secret')).toEqual({ valid: true, task: signed })
   })
 
-  it.each(['rootRequest', 'pageRevision', 'targetComponentIds', 'actionScopes'] as const)(
+  it.each(['rootRequest', 'pageRevision', 'actionScopes'] as const)(
     'rejects tampering with %s',
     (field) => {
       const signed = signPendingTask(unsignedTask(), 'test-secret')
@@ -43,9 +41,7 @@ describe('pendingTask integrity', () => {
           ? '删除全部图片'
           : field === 'pageRevision'
             ? 4
-            : field === 'actionScopes'
-              ? [{ ...signed.actionScopes?.[0], kind: 'delete' }]
-              : ['component-1']
+            : [{ ...signed.actionScopes[0], kind: 'delete' }]
       }
       expect(verifyPendingTask(tampered, 'test-secret')).toMatchObject({ valid: false })
     }

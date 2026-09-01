@@ -3,15 +3,13 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import { validateAndRepairPageData } from '../../../src/domain/pageValidation'
 import type { AIConversationMemory, AIConversationMessage } from '../../../src/types/aiPatch'
-import { retrieveComponentsWithRag } from '../../componentRag'
 import { createPageEditAgent } from '../graph/pageEditAgent'
 import { createInitialPageEditState, type PageEditGraphResult, type PageEditStateValue } from '../graph/pageEditState'
-import { createDefaultLargeEditPlanner } from '../graph/largeEditGraph'
 import { getPendingTaskSecret, verifyPendingTask } from '../graph/pendingTaskIntegrity'
 import { createOpenRouterClient } from '../model/openRouterClient'
 import { createSSEWriter } from './sse'
 
-const AI_EDIT_SERVER_VERSION = 'pending-task-v2'
+const AI_EDIT_SERVER_VERSION = 'pending-task-v3'
 
 export interface PageEditEnvironment {
   NODE_ENV?: string
@@ -21,11 +19,6 @@ export interface PageEditEnvironment {
   OPENROUTER_API_KEY2?: string
   AI_BASE_URL2?: string
   AI_MODEL2?: string
-  AI_PLANNING_MODEL?: string
-  AI_RAG_ENABLED?: string
-  AI_EMBEDDING_API_KEY?: string
-  AI_EMBEDDING_BASE_URL?: string
-  AI_EMBEDDING_MODEL?: string
   AI_PENDING_TASK_SECRET?: string
 }
 
@@ -139,20 +132,7 @@ export const createEditPageHandler = (options: {
       : undefined
     const agent = options.createAgent?.(controller.signal) || createPageEditAgent({
       modelClient: createOpenRouterClient({ apiKey: options.env.OPENROUTER_API_KEY || '', baseUrl, model }),
-      contextModelClient,
-      retrieveCandidates: (query, componentIndex, signal) => retrieveComponentsWithRag({
-        query,
-        componentIndex,
-        apiKey: options.env.AI_RAG_ENABLED === 'false' ? '' : options.env.AI_EMBEDDING_API_KEY || options.env.OPENROUTER_API_KEY || '',
-        baseUrl: options.env.AI_EMBEDDING_BASE_URL || baseUrl,
-        model: options.env.AI_EMBEDDING_MODEL || 'openai/text-embedding-3-small',
-        signal: signal || controller.signal,
-        topK: 16
-      }),
-      planLargeEdit: createDefaultLargeEditPlanner({
-        apiKey: options.env.OPENROUTER_API_KEY || '', baseUrl,
-        model: options.env.AI_PLANNING_MODEL || model
-      })
+      contextModelClient
     })
     const pendingIntegritySecret = getPendingTaskSecret(options.env.AI_PENDING_TASK_SECRET)
     const pendingValidation = verifyPendingTask(body.pendingTask, pendingIntegritySecret)
@@ -161,7 +141,9 @@ export const createEditPageHandler = (options: {
     const inputPendingTask = verifiedPendingTask
       && verifiedPendingTask.pageId === page.id
       && verifiedPendingTask.pageRevision === baseRevision
-      && [...verifiedPendingTask.targetComponentIds, ...verifiedPendingTask.candidateComponentIds].every((id) => pageIds.has(id))
+      && verifiedPendingTask.actionScopes
+        .flatMap((action) => [...action.targetComponentIds, ...action.candidateComponentIds])
+        .every((id) => pageIds.has(id))
       ? verifiedPendingTask
       : null
     if (body.pendingTask != null && !inputPendingTask) {

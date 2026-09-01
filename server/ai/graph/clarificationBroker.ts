@@ -54,7 +54,7 @@ export const clarificationBroker = (input: {
   const primary = proposals[0]!
   if (input.task.clarificationUsed === 0) {
     const unsigned: Omit<AIPendingTask, 'integrityToken'> = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       taskId: input.task.taskId,
       pageId: input.task.pageId,
       pageRevision: input.task.pageRevision,
@@ -62,17 +62,13 @@ export const clarificationBroker = (input: {
       taskIntent: input.task.intent,
       rootRequest: input.task.rootRequest,
       additionalInstructions: [...input.task.additionalInstructions],
-      targetComponentIds: [...input.task.targetComponentIds],
-      candidateComponentIds: [...input.task.candidateComponentIds],
-      actionScopes: [...(input.task.actionScopes || [])],
+      actionScopes: [...input.task.actionScopes],
       clarification: {
         used: 1,
         max: 1,
         code: primary.code,
         question: primary.question.slice(0, 500),
-        source: primary.source === 'router'
-          ? 'context_router'
-          : primary.source
+        source: primary.source
       }
     }
     return {

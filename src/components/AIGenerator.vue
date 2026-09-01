@@ -110,6 +110,8 @@ const historyStore = useHistoryStore()
 const conversationStore = useAIConversationStore()
 conversationStore.load()
 
+const MAX_CONTEXT_MESSAGES = 6
+
 const currentPage = computed(() => editorStore.currentPage)
 const currentSession = computed(() => {
   const page = currentPage.value
@@ -199,7 +201,9 @@ const edit = async (message: string, signal: AbortSignal) => {
   conversationStore.syncRevision(page.id, baseRevision)
   const session = conversationStore.getSession(page.id, baseRevision)
   const requestMessages = JSON.parse(JSON.stringify(
-    session.recentMessages.filter((item) => item.status === 'completed')
+    session.recentMessages
+      .filter((item) => item.status === 'completed')
+      .slice(-MAX_CONTEXT_MESSAGES)
   ))
   const requestMemory = JSON.parse(JSON.stringify(session.memory))
   const requestPendingTask = session.pendingTask

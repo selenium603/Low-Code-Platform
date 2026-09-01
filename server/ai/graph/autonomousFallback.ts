@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 
 import type { AutonomousFallback, ClarificationProposal } from '../../../src/types/aiPatch'
-import type { RagCandidate, RagComponentIndexItem } from '../../componentRag'
+import type { RagCandidate, RagComponentIndexItem } from '../context/componentIndex'
 export { isPureAddRequest } from './editActionAnalysis'
 
 export type CandidateEvidence = Extract<AutonomousFallback, { kind: 'select_best_candidate' }>['evidence'][number]

@@ -1,9 +1,11 @@
 import type {
+  AIEditActionScope,
   AIPendingTask,
   AutonomousFallback,
   PendingConfirmationEvidence,
   PendingRelation
 } from '../../../src/types/aiPatch'
+import { contextTargetIdsFor } from './editSemanticAnalysis'
 
 const UNINFORMATIVE_CONFIRM = /^(?:是|可以|行|好|好的|继续|同意|没问题|嗯)[。！!？?]*$/
 
@@ -18,13 +20,10 @@ export const deriveResumeFallbacks = (input: {
 }): AutonomousFallback[] => {
   if (!isUninformativePendingReply(input.relation, input.currentMessage)) return []
   const { clarification } = input.pendingTask
-  if (clarification.source === 'large_edit_planner') {
-    return [{ kind: 'use_conservative_plan', maxSteps: 2, operationLimit: 8 }]
-  }
   if (clarification.code === 'MISSING_EXECUTION_DATA') {
     return [{
       kind: 'use_model_defaults',
-      allowedComponentIds: [...input.pendingTask.targetComponentIds]
+      allowedComponentIds: contextTargetIdsFor(input.pendingTask)
     }]
   }
   if (clarification.code === 'CONFLICTING_REQUIREMENTS') {
@@ -40,8 +39,12 @@ export const pendingConfirmationEvidenceFrom = (input: {
 }): PendingConfirmationEvidence => ({
   clarificationCode: input.pendingTask.clarification.code,
   clarificationSource: input.pendingTask.clarification.source,
-  signedTargetComponentIds: [...input.pendingTask.targetComponentIds],
-  signedCandidateComponentIds: [...input.pendingTask.candidateComponentIds],
+  signedActionScopes: input.pendingTask.actionScopes.map((action): AIEditActionScope => ({
+    ...action,
+    componentTypes: [...action.componentTypes],
+    targetComponentIds: [...action.targetComponentIds],
+    candidateComponentIds: [...action.candidateComponentIds]
+  })),
   relation: input.relation,
   rawUserReply: input.currentMessage
 })

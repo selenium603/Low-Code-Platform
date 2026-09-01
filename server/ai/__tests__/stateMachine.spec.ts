@@ -7,7 +7,7 @@ import { normalizeRoutingDecision, pendingQuickRelation } from '../graph/routing
 import { reduceTaskState } from '../graph/taskReducer'
 
 const pending = (): AIPendingTask => ({
-  schemaVersion: 2,
+  schemaVersion: 3,
   taskId: 'task-1',
   pageId: 'page-1',
   pageRevision: 2,
@@ -15,8 +15,7 @@ const pending = (): AIPendingTask => ({
   taskIntent: 'local_edit',
   rootRequest: '加点图片',
   additionalInstructions: [],
-  targetComponentIds: [],
-  candidateComponentIds: [],
+  actionScopes: [],
   clarification: { used: 1, max: 1, code: 'MISSING_EXECUTION_DATA', question: '添加什么图片？', source: 'component_locator' },
   integrityToken: 'verified-by-handler'
 })
@@ -28,8 +27,7 @@ const task = (clarificationUsed: 0 | 1): AIEditTaskState => ({
   intent: 'local_edit',
   rootRequest: '加点图片',
   additionalInstructions: [],
-  targetComponentIds: [],
-  candidateComponentIds: [],
+  actionScopes: [],
   clarificationUsed,
   resumedFromPending: clarificationUsed === 1,
   delegatedToModel: clarificationUsed === 1
@@ -82,7 +80,7 @@ describe('execution authorization', () => {
     const policy = deriveExecutionPolicy({
       task: task(1),
       authorizationEvidence: { rootUserMessage: '优化页面', additionalUserMessages: [] },
-      appliedFallbacks: [{ kind: 'use_conservative_plan', maxSteps: 2, operationLimit: 4 }]
+      appliedFallbacks: [{ kind: 'limit_execution', operationLimit: 4 }]
     })
     expect(policy.allowDelete).toBe(false)
   })
@@ -96,14 +94,17 @@ describe('execution authorization', () => {
   })
 
   it('authorizes only signed targets after an affirmative deletion confirmation', () => {
+    const deleteAction = {
+      actionId: 'delete-button', kind: 'delete' as const, instruction: '删除按钮', targetScope: 'components' as const,
+      componentTypes: [], targetComponentIds: ['button-1'], candidateComponentIds: []
+    }
     const policy = deriveExecutionPolicy({
-      task: { ...task(1), targetComponentIds: ['button-1'] },
+      task: { ...task(1), actionScopes: [deleteAction] },
       authorizationEvidence: { rootUserMessage: '整理这个区域', additionalUserMessages: ['可以'] },
       pendingConfirmationEvidence: {
         clarificationCode: 'DELETION_AUTH_REQUIRED',
         clarificationSource: 'patch_generator',
-        signedTargetComponentIds: ['button-1'],
-        signedCandidateComponentIds: [],
+        signedActionScopes: [deleteAction],
         relation: 'answer',
         rawUserReply: '可以'
       }
@@ -116,14 +117,17 @@ describe('execution authorization', () => {
   })
 
   it('keeps deletion disabled after a signed rejection', () => {
+    const deleteAction = {
+      actionId: 'delete-button', kind: 'delete' as const, instruction: '删除按钮', targetScope: 'components' as const,
+      componentTypes: [], targetComponentIds: ['button-1'], candidateComponentIds: []
+    }
     const policy = deriveExecutionPolicy({
-      task: { ...task(1), targetComponentIds: ['button-1'] },
+      task: { ...task(1), actionScopes: [deleteAction] },
       authorizationEvidence: { rootUserMessage: '整理这个区域', additionalUserMessages: ['不可以'] },
       pendingConfirmationEvidence: {
         clarificationCode: 'DELETION_AUTH_REQUIRED',
         clarificationSource: 'patch_generator',
-        signedTargetComponentIds: ['button-1'],
-        signedCandidateComponentIds: [],
+        signedActionScopes: [deleteAction],
         relation: 'answer',
         rawUserReply: '不可以'
       }
@@ -132,16 +136,15 @@ describe('execution authorization', () => {
     expect(policy.deleteAuthorization.componentIds).toEqual([])
   })
 
-  it('uses the strictest limits from all conservative fallbacks', () => {
+  it('uses the strictest operation limit from all execution fallbacks', () => {
     const policy = deriveExecutionPolicy({
       task: task(1),
       authorizationEvidence: { rootUserMessage: '优化页面', additionalUserMessages: [] },
       appliedFallbacks: [
-        { kind: 'use_conservative_plan', maxSteps: 4, operationLimit: 8 },
-        { kind: 'use_conservative_plan', maxSteps: 2, operationLimit: 4 }
+        { kind: 'limit_execution', operationLimit: 8 },
+        { kind: 'limit_execution', operationLimit: 4 }
       ]
     })
-    expect(policy.maxPlanSteps).toBe(2)
     expect(policy.operationLimit).toBe(4)
   })
 })

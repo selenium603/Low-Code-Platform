@@ -17,7 +17,7 @@ const testPage: PageData = {
 }
 
 const pendingTask: AIPendingTask = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   taskId: 'task-1',
   pageId: 'page-1',
   pageRevision: 1,
@@ -25,8 +25,10 @@ const pendingTask: AIPendingTask = {
   taskIntent: 'local_edit',
   rootRequest: '优化标题',
   additionalInstructions: [],
-  targetComponentIds: ['title'],
-  candidateComponentIds: [],
+  actionScopes: [{
+    actionId: 'update-title', kind: 'update', instruction: '优化标题', targetScope: 'components',
+    componentTypes: [ComponentType.TEXT], targetComponentIds: ['title'], candidateComponentIds: []
+  }],
   clarification: { used: 1, max: 1, code: 'MISSING_EXECUTION_DATA', question: '希望什么风格？', source: 'patch_generator' },
   integrityToken: 'verified'
 }

@@ -1,7 +1,7 @@
 import type { RunnableConfig } from '@langchain/core/runnables'
 
 import type { ModelRoutingDecision, PageEditIntent, PendingRelation } from '../../../src/types/aiPatch'
-import { compactStructuredValue, contextIntentSchema, strictResponseFormat, toolRouteSchema } from '../../structuredSchemas'
+import { compactStructuredValue, contextIntentSchema, strictResponseFormat } from '../../structuredSchemas'
 import type { OpenRouterClient } from '../model/openRouterClient'
 import type { PageEditRoutingTraceStep, PageEditStateUpdate, PageEditStateValue } from './pageEditState'
 
@@ -62,61 +62,42 @@ export const createContextIntentNode = (dependencies: ModelIntentRouterDependenc
   state: PageEditStateValue,
   config?: RunnableConfig
 ): Promise<PageEditStateUpdate> => {
-  if (!dependencies.contextModelClient) {
-    return {
-      routingDecision: null,
-      intent: 'unresolved',
-      routingReason: '未配置上下文语义模型，进入工具路由兜底。',
-      routingTrace: appendTrace(state, { source: 'context', outcome: 'fallback', reason: '未配置上下文语义模型。' })
-    }
-  }
-  let lastError = '上下文模型未返回结果。'
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const completion = await dependencies.contextModelClient.completeStructured({
-        messages: [
-          { role: 'system', content: systemPrompt('context', Boolean(state.pendingTask)) },
-          { role: 'user', content: JSON.stringify(compactRoutingContext(state)) }
-        ],
-        responseFormat: strictResponseFormat('page_edit_context_intent', contextIntentSchema),
-        signal: config?.signal,
-        temperature: 0,
-        maxTokens: 300,
-        timeoutMs: 4_000
-      })
-      const decision = parseDecision(completion.value)
-      if (!decision) throw new Error('上下文模型返回了无效的意图结果。')
-      return {
-        routingDecision: decision,
-        intent: decision.intent,
-        routingSource: 'context',
-        routingReason: decision.reason,
-        routingTrace: appendTrace(state, { source: 'context', outcome: 'resolved', reason: decision.reason })
+  let lastError = dependencies.contextModelClient ? '上下文模型未返回结果。' : '未配置上下文语义模型。'
+  if (dependencies.contextModelClient) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const completion = await dependencies.contextModelClient.completeStructured({
+          messages: [
+            { role: 'system', content: systemPrompt('context', Boolean(state.pendingTask)) },
+            { role: 'user', content: JSON.stringify(compactRoutingContext(state)) }
+          ],
+          responseFormat: strictResponseFormat('page_edit_context_intent', contextIntentSchema),
+          signal: config?.signal,
+          temperature: 0,
+          maxTokens: 300,
+          timeoutMs: 4_000
+        })
+        const decision = parseDecision(completion.value)
+        if (!decision) throw new Error('上下文模型返回了无效的意图结果。')
+        return {
+          routingDecision: decision,
+          intent: decision.intent,
+          routingSource: 'context',
+          routingReason: decision.reason,
+          routingTrace: appendTrace(state, { source: 'context', outcome: 'resolved', reason: decision.reason })
+        }
+      } catch (error) {
+        lastError = errorMessage(error)
       }
-    } catch (error) {
-      lastError = errorMessage(error)
     }
   }
-  return {
-    routingDecision: null,
-    intent: 'unresolved',
-    routingSource: 'context',
-    routingReason: `上下文语义路由失败：${lastError}`,
-    routingTrace: appendTrace(state, { source: 'context', outcome: 'error', reason: lastError })
-  }
-}
-
-export const createToolIntentNode = (dependencies: ModelIntentRouterDependencies) => async (
-  state: PageEditStateValue,
-  config?: RunnableConfig
-): Promise<PageEditStateUpdate> => {
   try {
     const completion = await dependencies.modelClient.completeStructured({
       messages: [
         { role: 'system', content: systemPrompt('tool', Boolean(state.pendingTask)) },
         { role: 'user', content: JSON.stringify({ ...compactRoutingContext(state), previousRoutingFailure: state.routingReason || null }) }
       ],
-      responseFormat: strictResponseFormat('page_edit_tool_route', toolRouteSchema),
+      responseFormat: strictResponseFormat('page_edit_qwen_route', contextIntentSchema),
       signal: config?.signal,
       temperature: 0,
       maxTokens: 300,
@@ -129,7 +110,10 @@ export const createToolIntentNode = (dependencies: ModelIntentRouterDependencies
       intent: decision.intent,
       routingSource: 'tool',
       routingReason: decision.reason,
-      routingTrace: appendTrace(state, { source: 'tool', outcome: 'resolved', reason: decision.reason })
+      routingTrace: [
+        ...appendTrace(state, { source: 'context', outcome: 'error', reason: lastError }),
+        { source: 'tool', outcome: 'resolved', reason: decision.reason }
+      ]
     }
   } catch (error) {
     const message = errorMessage(error)
@@ -139,7 +123,10 @@ export const createToolIntentNode = (dependencies: ModelIntentRouterDependencies
       intent: 'unresolved',
       routingSource: 'tool',
       routingReason: `工具路由失败：${message}`,
-      routingTrace: appendTrace(state, { source: 'tool', outcome: 'error', reason: message }),
+      routingTrace: [
+        ...appendTrace(state, { source: 'context', outcome: 'error', reason: lastError }),
+        { source: 'tool', outcome: 'error', reason: message }
+      ],
       result: {
         type: 'execution_failed',
         runId: state.runId,

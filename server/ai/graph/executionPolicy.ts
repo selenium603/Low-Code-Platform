@@ -29,19 +29,18 @@ const deriveDeleteAuthorization = (input: {
   const signedConfirmation = input.pendingConfirmationEvidence?.clarificationCode === 'DELETION_AUTH_REQUIRED'
     && input.pendingConfirmationEvidence.relation === 'answer'
     && EXACT_DELETE_CONFIRM.test(reply)
-    && input.pendingConfirmationEvidence.signedTargetComponentIds.length > 0
+    && deleteTargetIdsFor({ actionScopes: input.pendingConfirmationEvidence.signedActionScopes }).length > 0
   if (signedConfirmation && input.pendingConfirmationEvidence) {
-    const componentIds = [...new Set(input.pendingConfirmationEvidence.signedTargetComponentIds)].slice(0, 12)
+    const componentIds = deleteTargetIdsFor({ actionScopes: input.pendingConfirmationEvidence.signedActionScopes }).slice(0, 12)
     return { authorized: true, source: 'signed_pending_confirmation', componentIds }
   }
 
   const scopedDeleteIds = deleteTargetIdsFor(input.task)
-  const explicitDeleteIds = scopedDeleteIds.length ? scopedDeleteIds : input.task.targetComponentIds
-  if (hasExplicitDeleteAuthorization(input.authorizationEvidence) && explicitDeleteIds.length) {
+  if (hasExplicitDeleteAuthorization(input.authorizationEvidence) && scopedDeleteIds.length) {
     return {
       authorized: true,
       source: 'explicit_user_request',
-      componentIds: [...new Set(explicitDeleteIds)].slice(0, 12)
+      componentIds: scopedDeleteIds.slice(0, 12)
     }
   }
   return { authorized: false, source: 'none', componentIds: [] }
@@ -57,11 +56,10 @@ export const deriveExecutionPolicy = (input: {
   const geometryFallback = fallbacks.find((fallback): fallback is Extract<AutonomousFallback, { kind: 'limit_geometry_scope' }> => (
     fallback.kind === 'limit_geometry_scope'
   ))
-  const conservative = fallbacks.filter((fallback): fallback is Extract<AutonomousFallback, { kind: 'use_conservative_plan' }> => (
-    fallback.kind === 'use_conservative_plan'
+  const executionLimits = fallbacks.filter((fallback): fallback is Extract<AutonomousFallback, { kind: 'limit_execution' }> => (
+    fallback.kind === 'limit_execution'
   ))
-  const operationLimit = conservative.reduce((limit, fallback) => Math.min(limit, fallback.operationLimit), 12)
-  const maxPlanSteps = conservative.reduce((limit, fallback) => Math.min(limit, fallback.maxSteps), 6)
+  const operationLimit = executionLimits.reduce((limit, fallback) => Math.min(limit, fallback.operationLimit), 12)
   const deleteAuthorization = deriveDeleteAuthorization(input)
   return {
     canClarify: input.task.clarificationUsed === 0,
@@ -70,7 +68,6 @@ export const deriveExecutionPolicy = (input: {
     deleteAuthorization,
     allowRegionalRelayout: Boolean(geometryFallback),
     maxAffectedComponents: geometryFallback?.maxAffectedComponents || 12,
-    operationLimit: Math.max(1, operationLimit),
-    maxPlanSteps: Math.max(2, maxPlanSteps)
+    operationLimit: Math.max(1, operationLimit)
   }
 }

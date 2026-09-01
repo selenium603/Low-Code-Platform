@@ -301,16 +301,6 @@ export const layoutPlanSchema: JsonSchema = object({
   }), { minItems: 4, maxItems: 6 })
 })
 
-export const createComponentLocatorSchema = (canClarify: boolean): JsonSchema => object({
-  type: enumString(canClarify ? ['selection', 'need_clarification'] : ['selection']),
-  scope: nullable(enumString(['components', 'page'])),
-  componentIds: nullable(array(string, { maxItems: 12 })),
-  reason: nullable(string),
-  question: nullable(string),
-  clarificationCode: nullable(clarificationCode)
-})
-export const componentLocatorSchema = createComponentLocatorSchema(true)
-
 export const createEditSemanticAnalysisSchema = (componentIds: string[]): JsonSchema => object({
   type: enumString(['semantic_actions', 'need_clarification']),
   actions: nullable(array(object({
@@ -330,27 +320,6 @@ export const contextIntentSchema: JsonSchema = object({
   relationToPending: enumString(['none', 'answer', 'supplement', 'delegate', 'replace', 'cancel', 'question', 'chat', 'unresolved']),
   reason: { type: 'string', minLength: 1, maxLength: 300 }
 })
-
-export const toolRouteSchema: JsonSchema = object({
-  intent: enumString(['local_edit', 'large_edit', 'full_relayout', 'question', 'chat', 'cancel', 'unresolved']),
-  relationToPending: enumString(['none', 'answer', 'supplement', 'delegate', 'replace', 'cancel', 'question', 'chat', 'unresolved']),
-  reason: { type: 'string', minLength: 1, maxLength: 300 }
-})
-
-export const createLargeEditResponseSchema = (canClarify: boolean): JsonSchema => object({
-  type: enumString(canClarify ? ['page_edit_plan', 'need_clarification'] : ['page_edit_plan']),
-  summary: nullable(string),
-  steps: nullable(array(object({
-    id: string,
-    title: string,
-    instruction: string,
-    scope: enumString(['page', 'components']),
-    operationBudget: integer
-  }), { minItems: 2, maxItems: 6 })),
-  question: nullable(string),
-  clarificationCode: nullable(clarificationCode)
-})
-export const largeEditResponseSchema = createLargeEditResponseSchema(true)
 
 export const assistantReplySchema: JsonSchema = object({
   type: enumString(['assistant_reply']),

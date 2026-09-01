@@ -41,8 +41,6 @@ export const reduceTaskState = (input: {
     intent,
     rootRequest: rootRequest.trim().slice(0, 1_000),
     additionalInstructions: [],
-    targetComponentIds: [],
-    candidateComponentIds: [],
     actionScopes: [],
     clarificationUsed: 0,
     resumedFromPending: false,
@@ -94,9 +92,12 @@ export const reduceTaskState = (input: {
       intent: pending.taskIntent,
       rootRequest: pending.rootRequest,
       additionalInstructions,
-      targetComponentIds: [...pending.targetComponentIds],
-      candidateComponentIds: [...pending.candidateComponentIds],
-      actionScopes: [...(pending.actionScopes || [])],
+      actionScopes: pending.actionScopes.map((action) => ({
+        ...action,
+        componentTypes: [...action.componentTypes],
+        targetComponentIds: [...action.targetComponentIds],
+        candidateComponentIds: [...action.candidateComponentIds]
+      })),
       clarificationUsed: 1,
       resumedFromPending: true,
       delegatedToModel: input.decision.relationToPending === 'delegate'

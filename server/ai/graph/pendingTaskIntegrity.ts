@@ -20,13 +20,9 @@ const clarificationCodes = new Set<AIBusinessClarificationCode>([
 ])
 
 const clarificationSources = new Set<AIClarificationSource>([
-  'rule_router',
-  'context_router',
-  'tool_router',
   'component_locator',
   'semantic_analyzer',
   'patch_generator',
-  'large_edit_planner',
   'geometry_validator'
 ])
 
@@ -70,7 +66,8 @@ const cleanActionScopes = (value: unknown): AIEditActionScope[] => Array.isArray
         componentTypes: Array.isArray(raw.componentTypes)
           ? [...new Set(raw.componentTypes.filter((type): type is AIEditActionScope['componentTypes'][number] => types.has(String(type))))]
           : [],
-        targetComponentIds: cleanIds(raw.targetComponentIds)
+        targetComponentIds: cleanIds(raw.targetComponentIds),
+        candidateComponentIds: cleanIds(raw.candidateComponentIds)
       }]
     })
   : []
@@ -122,14 +119,14 @@ const normalizeUnsignedPendingTask = (value: unknown): Omit<AIPendingTask, 'inte
   const pageId = cleanString(raw.pageId, MAX_ID_LENGTH)
   const rootRequest = cleanString(raw.rootRequest, MAX_ROOT_REQUEST_LENGTH)
   const question = cleanString(clarification?.question, MAX_QUESTION_LENGTH)
-  if (raw.schemaVersion !== 2 || raw.status !== 'awaiting_user' || !taskId || !pageId || !rootRequest || !question) return null
+  if (raw.schemaVersion !== 3 || raw.status !== 'awaiting_user' || !taskId || !pageId || !rootRequest || !question) return null
   if (!Number.isInteger(raw.pageRevision) || Number(raw.pageRevision) < 0) return null
   if (!taskIntents.has(raw.taskIntent as AIPendingTask['taskIntent'])) return null
   if (clarification?.used !== 1 || clarification.max !== 1) return null
   if (!clarificationCodes.has(clarification.code as AIBusinessClarificationCode)) return null
   if (!clarificationSources.has(clarification.source as AIClarificationSource)) return null
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     taskId,
     pageId,
     pageRevision: Number(raw.pageRevision),
@@ -137,8 +134,6 @@ const normalizeUnsignedPendingTask = (value: unknown): Omit<AIPendingTask, 'inte
     taskIntent: raw.taskIntent as AIPendingTask['taskIntent'],
     rootRequest,
     additionalInstructions: cleanInstructions(raw.additionalInstructions),
-    targetComponentIds: cleanIds(raw.targetComponentIds),
-    candidateComponentIds: cleanIds(raw.candidateComponentIds),
     actionScopes: cleanActionScopes(raw.actionScopes),
     clarification: {
       used: 1,

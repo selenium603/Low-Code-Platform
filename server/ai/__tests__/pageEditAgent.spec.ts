@@ -50,9 +50,7 @@ const fakeModelClient = {
 }
 
 const createAgent = () => createPageEditAgent({
-  modelClient: fakeModelClient,
-  retrieveCandidates: async () => ({ mode: 'lexical', candidates: [] }),
-  planLargeEdit: async () => { throw new Error('not used') }
+  modelClient: fakeModelClient
 })
 
 describe('page edit agent clarification budget', () => {
@@ -176,9 +174,7 @@ describe('page edit agent clarification budget', () => {
       }
     }
     const agent = createPageEditAgent({
-      modelClient,
-      retrieveCandidates: async () => ({ mode: 'lexical', candidates: [] }),
-      planLargeEdit: async () => { throw new Error('not used') }
+      modelClient
     })
     const result = await agent.invoke(createInitialPageEditState({
       runId: 'run-complex',
@@ -193,5 +189,75 @@ describe('page edit agent clarification budget', () => {
     expect(result.result.page.components.some((component) => component.id === 'footer-button')).toBe(false)
     expect(result.result.page.components.some((component) => component.id === 'hero-image')).toBe(true)
     expect(result.result.page.components.find((component) => component.id === 'existing-title')?.style.color).toBe('#ff0000')
+  })
+
+  it('executes Large actions through one shared Unit Executor loop', async () => {
+    const rawSource = page()
+    rawSource.components.push({
+      id: 'cta-button', type: ComponentType.BUTTON, name: '行动按钮',
+      props: { content: '立即开始', type: 'primary' },
+      style: { top: 180, left: 40, width: 160, height: 48, zIndex: 2, rotate: 0, opacity: 1 },
+      events: [], schemaVersion: '2026.05'
+    })
+    const source = validateAndRepairPageData(rawSource).page
+    let patchCalls = 0
+    const modelClient = {
+      async completeStructured(input: {
+        messages?: Array<{ content: string }>
+        responseFormat?: { json_schema?: { name?: string } }
+      }) {
+        const name = input.responseFormat?.json_schema?.name
+        if (name === 'page_edit_semantic_actions') {
+          const value = {
+            type: 'semantic_actions', question: null, clarificationCode: null,
+            actions: [
+              {
+                actionId: 'update-title', kind: 'update', instruction: '把主标题改成红色', targetScope: 'components',
+                componentTypes: ['Text'], componentIds: ['existing-title']
+              },
+              {
+                actionId: 'update-button', kind: 'update', instruction: '把行动按钮改成绿色', targetScope: 'components',
+                componentTypes: ['Button'], componentIds: ['cta-button']
+              }
+            ]
+          }
+          return { value, content: JSON.stringify(value) }
+        }
+        patchCalls += 1
+        const payload = JSON.parse(input.messages?.[1]?.content || '{}') as {
+          executionUnit?: { actionIds?: string[] }
+        }
+        const titleUnit = payload.executionUnit?.actionIds?.includes('update-title')
+        const value = {
+          type: 'page_patch', question: null, clarificationCode: null, baseRevision: 1,
+          summary: titleUnit ? '修改主标题' : '修改行动按钮',
+          operations: [{
+            op: 'updateStyle',
+            componentId: titleUnit ? 'existing-title' : 'cta-button',
+            device: 'desktop',
+            changes: { color: titleUnit ? '#ff0000' : '#00aa44' }
+          }]
+        }
+        return { value, content: JSON.stringify(value) }
+      }
+    }
+    const agent = createPageEditAgent({
+      modelClient
+    })
+
+    const output = await agent.invoke(createInitialPageEditState({
+      runId: 'run-large-units',
+      request: '大幅修改多个区域，把主标题改成红色，把行动按钮改成绿色',
+      page: source,
+      baseRevision: 1,
+      pendingIntegritySecret: 'integration-test-secret'
+    }))
+
+    expect(output.result?.type).toBe('page_edit_completed')
+    if (output.result?.type !== 'page_edit_completed') return
+    expect(patchCalls).toBe(2)
+    expect(output.result.stepCount).toBe(2)
+    expect(output.result.page.components.find((component) => component.id === 'existing-title')?.style.color).toBe('#ff0000')
+    expect(output.result.page.components.find((component) => component.id === 'cta-button')?.style.color).toBe('#00aa44')
   })
 })

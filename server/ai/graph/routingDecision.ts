@@ -33,7 +33,10 @@ export const normalizeRoutingDecision = (input: {
 }): { decision: NormalizedRoutingDecision; pendingTask: AIPendingTask | null } => {
   const quick = input.pendingTask ? pendingQuickRelation(input.message) : null
   const ids = input.pendingTask
-    ? [...input.pendingTask.targetComponentIds, ...input.pendingTask.candidateComponentIds]
+    ? input.pendingTask.actionScopes.flatMap((action) => [
+        ...action.targetComponentIds,
+        ...action.candidateComponentIds
+      ])
     : []
   const pendingValid = Boolean(input.pendingTask
     && input.pendingTask.pageId === input.currentPageId
@@ -52,6 +55,11 @@ export const normalizeRoutingDecision = (input: {
   if (!pendingTask && (intent === 'cancel' || intent === 'chat') && editIntent(input.decision.intent)) intent = input.decision.intent
   return {
     pendingTask,
-    decision: { intent, relationToPending: relation, reason: input.decision.reason.slice(0, 300), source: input.source }
+    decision: {
+      intent,
+      relationToPending: relation,
+      reason: input.decision.reason.slice(0, 300),
+      source: input.source
+    }
   }
 }

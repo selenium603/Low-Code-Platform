@@ -3,8 +3,9 @@ import { describe, expect, it } from 'vitest'
 import { ComponentType, type PageData } from '../../../src/types'
 import type { AIEditTaskState, ExecutionPolicy } from '../../../src/types/aiPatch'
 import { createEditSemanticAnalysisNode } from '../graph/editSemanticAnalysis'
+import { createExecutionUnitContext } from '../graph/executionContext'
+import { createExecutionUnits } from '../graph/executionUnits'
 import { deriveExecutionPolicy } from '../graph/executionPolicy'
-import { createLocateComponentsNode } from '../graph/locateComponents'
 import { createInitialPageEditState, type PageEditStateValue } from '../graph/pageEditState'
 import { validateGeneratedEditResponse } from '../graph/patchPolicy'
 import { createEditResponseSchema } from '../../structuredSchemas'
@@ -37,7 +38,7 @@ const page: PageData = {
 
 const taskFor = (request: string): AIEditTaskState => ({
   taskId: 'task-1', pageId: page.id, pageRevision: 1, intent: 'local_edit', rootRequest: request,
-  additionalInstructions: [], targetComponentIds: [], candidateComponentIds: [], actionScopes: [],
+  additionalInstructions: [], actionScopes: [],
   clarificationUsed: 0, resumedFromPending: false, delegatedToModel: false
 })
 
@@ -78,7 +79,7 @@ describe('complex edit semantic action scopes', () => {
     ])
   })
 
-  it('keeps deletion and update targets independent through policy and locator', async () => {
+  it('keeps deletion and update targets independent through policy and unit context', async () => {
     const semanticNode = createEditSemanticAnalysisNode({
       modelClient: {
         completeStructured: async () => ({ value: {
@@ -99,7 +100,10 @@ describe('complex edit semantic action scopes', () => {
     const initial = stateFor('删除页脚按钮，并把主标题改成红色')
     const analyzed = await semanticNode(initial)
     const task = analyzed.task!
-    expect(task.targetComponentIds).toEqual([])
+    expect(task.actionScopes.map((action) => action.targetComponentIds)).toEqual([
+      ['footer-button'],
+      ['main-title']
+    ])
 
     const policy = deriveExecutionPolicy({
       task,
@@ -107,12 +111,12 @@ describe('complex edit semantic action scopes', () => {
     })
     expect(policy.deleteAuthorization.componentIds).toEqual(['footer-button'])
 
-    const locator = createLocateComponentsNode({
-      modelClient: { completeStructured: async () => { throw new Error('semantic scopes must bypass Locator model') } },
-      retrieveCandidates: async () => ({ mode: 'lexical', candidates: [] })
-    })
-    const located = await locator({ ...initial, ...analyzed, task, executionPolicy: policy } as PageEditStateValue)
-    expect(located.selectedComponentIds).toEqual(['main-title', 'footer-button'])
+    const executionUnits = createExecutionUnits({ task, page, policy })
+    const located = createExecutionUnitContext({
+      ...initial, ...analyzed, task, executionPolicy: policy, executionUnits, unitIndex: 0
+    } as PageEditStateValue)
+    expect(located.selectedComponentIds).toHaveLength(2)
+    expect(located.selectedComponentIds).toEqual(expect.arrayContaining(['main-title', 'footer-button']))
     expect(located.allowedOperationKinds).toEqual(expect.arrayContaining(['updateProps', 'removeComponent']))
 
     const schema = JSON.stringify(createEditResponseSchema(
@@ -161,5 +165,30 @@ describe('complex edit semantic action scopes', () => {
     })
     const result = await node(stateFor('来个按钮'))
     expect(result.task?.actionScopes).toMatchObject([{ kind: 'add', targetScope: 'page', targetComponentIds: [] }])
+  })
+
+  it('represents full relayout as a page-scoped semantic action', async () => {
+    const node = createEditSemanticAnalysisNode({
+      modelClient: {
+        completeStructured: async () => ({ value: {
+          type: 'semantic_actions', question: null, clarificationCode: null,
+          actions: [{
+            actionId: 'relayout-page', kind: 'update', instruction: '重新设计整个页面布局', targetScope: 'page',
+            componentTypes: [], componentIds: []
+          }]
+        }, content: '{}' })
+      }
+    })
+    const initial = {
+      ...stateFor('重新设计整个页面布局'),
+      intent: 'full_relayout' as const,
+      task: { ...taskFor('重新设计整个页面布局'), intent: 'full_relayout' as const }
+    } as PageEditStateValue
+
+    const result = await node(initial)
+
+    expect(result.task?.actionScopes).toMatchObject([{
+      kind: 'update', targetScope: 'page', targetComponentIds: []
+    }])
   })
 })

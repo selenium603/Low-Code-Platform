@@ -26,4 +26,20 @@ describe('AI conversation migration', () => {
     expect(session.recentMessages).toHaveLength(2)
     expect(session.recentMessages.every((message) => message.status === 'completed')).toBe(true)
   })
+
+  it('keeps the latest 30 messages for UI history', () => {
+    const session = normalizeStoredAIConversationSession('page-1', {
+      recentMessages: Array.from({ length: 35 }, (_, index) => ({
+        id: `m${index + 1}`,
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `消息 ${index + 1}`,
+        createdAt: `2026-01-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+        status: 'completed'
+      }))
+    })
+
+    expect(session.recentMessages).toHaveLength(30)
+    expect(session.recentMessages[0]?.id).toBe('m6')
+    expect(session.recentMessages.at(-1)?.id).toBe('m35')
+  })
 })

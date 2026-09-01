@@ -11,7 +11,7 @@ import type {
 } from '@/types/aiPatch'
 
 const STORAGE_KEY = 'marketing-editor-ai-sessions'
-const MAX_RECENT_MESSAGES = 8
+const MAX_RECENT_MESSAGES = 30
 const MEMORY_LIMITS = {
   userGoals: { count: 4, length: 220 },
   designConstraints: { count: 5, length: 180 },
@@ -56,10 +56,10 @@ const normalizePendingTask = (value: unknown): AIPendingTask | null => {
   const clarification = raw.clarification && typeof raw.clarification === 'object'
     ? raw.clarification as Record<string, unknown>
     : null
-  const sources = ['rule_router', 'context_router', 'tool_router', 'semantic_analyzer', 'component_locator', 'patch_generator', 'large_edit_planner', 'geometry_validator']
+  const sources = ['semantic_analyzer', 'component_locator', 'patch_generator', 'geometry_validator']
   const codes = ['TARGET_AMBIGUOUS', 'DELETION_AUTH_REQUIRED', 'GEOMETRY_RELAYOUT_AUTH_REQUIRED', 'CONFLICTING_REQUIREMENTS', 'MISSING_EXECUTION_DATA']
   const intents = ['local_edit', 'large_edit', 'full_relayout']
-  if (raw.schemaVersion !== 2 || raw.status !== 'awaiting_user'
+  if (raw.schemaVersion !== 3 || raw.status !== 'awaiting_user'
     || typeof raw.taskId !== 'string' || typeof raw.pageId !== 'string'
     || !Number.isInteger(raw.pageRevision) || !intents.includes(String(raw.taskIntent))
     || typeof raw.rootRequest !== 'string' || typeof raw.integrityToken !== 'string'
@@ -88,12 +88,13 @@ const normalizePendingTask = (value: unknown): AIPendingTask | null => {
           componentTypes: Array.isArray(action.componentTypes)
             ? [...new Set(action.componentTypes.filter((type): type is AIEditActionScope['componentTypes'][number] => componentTypes.includes(String(type))))]
             : [],
-          targetComponentIds: cleanIds(action.targetComponentIds)
+          targetComponentIds: cleanIds(action.targetComponentIds),
+          candidateComponentIds: cleanIds(action.candidateComponentIds)
         }]
       })
     : []
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     taskId: raw.taskId.trim().slice(0, 160),
     pageId: raw.pageId.trim().slice(0, 160),
     pageRevision: Number(raw.pageRevision),
@@ -106,8 +107,6 @@ const normalizePendingTask = (value: unknown): AIPendingTask | null => {
           .map((item) => item.trim().replace(/\s+/g, ' ').slice(0, 500))
           .filter(Boolean))].slice(-6)
       : [],
-    targetComponentIds: cleanIds(raw.targetComponentIds),
-    candidateComponentIds: cleanIds(raw.candidateComponentIds),
     actionScopes,
     clarification: {
       used: 1,
@@ -155,7 +154,7 @@ export const normalizeStoredAIConversationSession = (pageId: string, value: unkn
     ? value as Partial<AIConversationSession> & { summary?: unknown }
     : {}
   const memory = raw.memory ? normalizeMemory(raw.memory) : migrateLegacySummary(raw.summary)
-  // openQuestions is derived only from a verifiable v2 pendingTask. Legacy
+  // openQuestions is derived only from a verifiable v3 pendingTask. Legacy
   // questions cannot be upgraded into resumable authorization.
   memory.openQuestions = []
   const recentMessages = Array.isArray(raw.recentMessages)

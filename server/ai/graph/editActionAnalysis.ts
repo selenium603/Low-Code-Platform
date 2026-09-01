@@ -42,7 +42,7 @@ const componentPatterns: Array<[ComponentType, RegExp]> = [
   [ComponentType.TEXT, /标题|正文|文本|文字|文案|段落|text/i]
 ]
 
-const componentTypesIn = (text: string) => componentPatterns
+export const detectComponentTypes = (text: string) => componentPatterns
   .filter(([, pattern]) => pattern.test(text))
   .map(([type]) => type)
 
@@ -86,7 +86,7 @@ export const analyzeEditActions = (request: string): EditActionAnalysis => {
       mentions.push({
         kind: match.kind,
         negated: NEGATION_BEFORE_ACTION.test(prefix),
-        componentTypes: componentTypesIn(actionText),
+        componentTypes: detectComponentTypes(actionText),
         rawClause: clause,
         action: match.action,
         start: match.index,
